@@ -18,8 +18,10 @@ pub fn page(title: &str, viewer: Option<&User>, body: Markup) -> Markup {
             body {
                 header.top {
                     a.brand href="/" { "loom" }
+                    form.search-box method="get" action="/search" { input type="search" name="q" placeholder="search" aria-label="search"; }
                     span.grow {}
                     @if let Some(u) = viewer {
+                        a.bell href="/notifications" title="notifications" { "🔔" @if u.unread > 0 { span.unread { (u.unread) } } }
                         a.btn href="/new" { "+ new" }
                         a href="/settings/keys" { (u.name) }
                         form.inline method="post" action="/logout" { button.link { "sign out" } }
@@ -100,6 +102,8 @@ pub struct Meta {
     pub can_admin: bool,
     pub open_issues: i64,
     pub open_pulls: i64,
+    /// `None` when signed out.
+    pub watching: Option<bool>,
 }
 
 pub struct Clone<'a> {
@@ -123,6 +127,11 @@ pub fn repo_header(repo: &Repo, clone: &Clone<'_>, meta: &Meta, tab: Tab, rev: &
                     @if !repo.description.is_empty() { p.muted { (repo.description) } }
                 }
                 div.actions {
+                    @if let Some(w) = meta.watching {
+                        form.inline method="post" action={ (base) "/watch" } {
+                            button.btn.pill title=@if w { "you get notified about all activity" } @else { "get notified about all activity" } { @if w { "◉ watching" } @else { "○ watch" } }
+                        }
+                    }
                     @match meta.starred {
                         Some(on) => form.inline method="post" action={ (base) "/star" } {
                             button.btn.pill { @if on { "★ starred" } @else { "☆ star" } span.count { (meta.stars) } }
@@ -149,6 +158,7 @@ pub fn repo_header(repo: &Repo, clone: &Clone<'_>, meta: &Meta, tab: Tab, rev: &
                 a.active[tab == Tab::Refs] href={ (base) "/refs" } { "branches & tags" }
                 a.active[tab == Tab::Issues] href={ (base) "/issues" } { "issues" @if meta.open_issues > 0 { span.tab-count { (meta.open_issues) } } }
                 a.active[tab == Tab::Pulls] href={ (base) "/pulls" } { "pulls" @if meta.open_pulls > 0 { span.tab-count { (meta.open_pulls) } } }
+                a href={ (base) "/search" } { "search" }
                 @if meta.can_admin { a.active[tab == Tab::Settings] href={ (base) "/settings" } { "settings" } }
             }
         }
@@ -692,6 +702,7 @@ pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: 
                                 " · "
                                 @if p.allow_delete { "deletion allowed" } @else { "no deletion" }
                                 @if p.require_pr { " · PRs only" }
+                                @if !p.required_checks.is_empty() { " · checks: " (p.required_checks.join(", ")) }
                             }
                             span.grow {}
                             form.inline method="post" action={ (base) "/protect/remove" } {
@@ -706,6 +717,7 @@ pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: 
                     label.check { input type="checkbox" name="allow_force_push" value="1"; "allow force-push" }
                     label.check { input type="checkbox" name="allow_delete" value="1"; "allow delete" }
                     label.check { input type="checkbox" name="require_pr" value="1"; "require pull request" }
+                    input name="required_checks" placeholder="required checks, e.g. ci/jenkins";
                     button.btn { "protect" }
                 }
             }

@@ -192,3 +192,26 @@ pub fn range_diff(dir: &Path, base1: &str, head1: &str, base2: &str, head2: &str
         .output())?;
     if o.status.success() { Ok(String::from_utf8_lossy(&o.stdout).into_owned()) } else { Err(stderr(&o)) }
 }
+
+/// Fixed-string, case-insensitive `git grep` at `rev`: (path, line, text).
+/// Binary files skipped; results capped.
+pub fn grep(dir: &Path, rev: &str, needle: &str, max: usize) -> Vec<(String, u32, String)> {
+    if needle.is_empty() || !is_sha(rev) {
+        return Vec::new();
+    }
+    let o = git(dir)
+        .args(["grep", "-n", "-I", "-F", "-i", "--max-count=5", "--no-color", "-e", needle, rev, "--"])
+        .output();
+    let Ok(o) = o else { return Vec::new() };
+    let prefix = format!("{rev}:");
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .filter_map(|l| {
+            let l = l.strip_prefix(&prefix)?;
+            let (path, rest) = l.split_once(':')?;
+            let (n, text) = rest.split_once(':')?;
+            Some((path.to_owned(), n.parse().ok()?, text.chars().take(300).collect()))
+        })
+        .take(max)
+        .collect()
+}

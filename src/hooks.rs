@@ -34,25 +34,58 @@ fn default_ref(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-pub fn after_update(db: &Db, data: &Path, repo: &Repo, pusher: Option<&User>, updates: &[Update]) {
+/// First lines of commits in old..new (newest last), for push payloads.
+fn pushed_commits(dir: &Path, old: &str, new: &str) -> Vec<(String, String)> {
+    if zero(new) {
+        return Vec::new();
+    }
+    let range = if zero(old) { new.to_owned() } else { format!("{old}..{new}") };
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(dir)
+        .args(["log", "--reverse", "-n", "20", "--format=%H%x00%B%x1e", "--end-of-options", &range])
+        .env_remove("GIT_DIR")
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    String::from_utf8_lossy(&out.stdout)
+        .split('\x1e')
+        .filter_map(|rec| {
+            let (sha, msg) = rec.trim_start_matches('\n').split_once('\0')?;
+            gitops::is_sha(sha).then(|| (sha.to_owned(), msg.trim_end().to_owned()))
+        })
+        .collect()
+}
+
+pub fn after_update(db: &Db, data: &Path, url: &str, repo: &Repo, pusher: Option<&User>, updates: &[Update]) {
     let dir = repo_dir(data, repo);
     let head = default_ref(&dir);
     let actor = pusher.map(|u| u.id);
+    let bus = crate::events::Bus { db, url };
     for u in updates {
+        if u.refname.starts_with("refs/heads/") || u.refname.starts_with("refs/tags/") {
+            let commits = pushed_commits(&dir, &u.old, &u.new);
+            crate::events::emit(&bus, crate::events::Ev::Push { repo, pusher, refname: &u.refname, before: &u.old, after: &u.new, commits });
+        }
         let Some(branch) = u.refname.strip_prefix("refs/heads/") else { continue };
         if u.refname == head && !zero(&u.new) {
             link_commits(db, &dir, repo.id, actor, &u.old, &u.new);
         }
         if let Ok(prs) = db.open_pulls_from(repo.id, branch) {
             for pr in prs {
-                sync_head(db, data, repo, &dir, &pr, actor, u);
+                if sync_head(db, data, repo, &dir, &pr, actor, u) {
+                    if let (Ok(Some(base)), Ok(Some(issue))) = (db.repo_by_id(pr.repo_id), db.issue(pr.repo_id, pr.number)) {
+                        if let Ok(Some(p)) = db.pull(base.id, pr.number) {
+                            crate::events::emit(&bus, crate::events::Ev::Pull { repo: &base, actor: pusher, issue: &issue, pull: &p, action: "synchronize" });
+                        }
+                    }
+                }
             }
         }
         if !zero(&u.new) {
             if let Ok(prs) = db.open_pulls_into(repo.id, branch) {
                 for pr in prs {
                     if gitops::is_ancestor(&dir, &pr.head_sha, &u.new) {
-                        merged(db, repo, &pr, actor, &u.new, "push");
+                        merged(db, url, repo, &pr, pusher, &u.new, "push");
                     }
                 }
             }
@@ -60,13 +93,18 @@ pub fn after_update(db: &Db, data: &Path, repo: &Repo, pusher: Option<&User>, up
     }
 }
 
-/// Mark merged, log it, and close issues the PR says it fixes.
-pub fn merged(db: &Db, repo: &Repo, pr: &crate::pulls_db::Pull, actor: Option<i64>, sha: &str, how: &str) {
+/// Mark merged, log it, announce it, and close issues the PR says it fixes.
+pub fn merged(db: &Db, url: &str, repo: &Repo, pr: &crate::pulls_db::Pull, by: Option<&User>, sha: &str, how: &str) {
+    let actor = by.map(|u| u.id);
     if !db.mark_merged(pr.issue_id, actor, sha).unwrap_or(false) {
         return;
     }
     let _ = db.add_event(pr.issue_id, actor, "merged", &format!("{sha}\t{}\t{how}", pr.base_branch), None);
     let Ok(Some(issue)) = db.issue(repo.id, pr.number) else { return };
+    if let Ok(Some(p)) = db.pull(repo.id, pr.number) {
+        let bus = crate::events::Bus { db, url };
+        crate::events::emit(&bus, crate::events::Ev::Pull { repo, actor: by, issue: &issue, pull: &p, action: "merged" });
+    }
     let text = format!("{}\n{}", issue.title, issue.body);
     for (r, number, closing) in crate::refs::issue_refs(&text) {
         if !closing || r.is_some() || number == pr.number {
@@ -79,15 +117,16 @@ pub fn merged(db: &Db, repo: &Repo, pr: &crate::pulls_db::Pull, actor: Option<i6
 }
 
 /// A PR's head branch moved: pin it in the base repo and record a revision.
-fn sync_head(db: &Db, data: &Path, head_repo: &Repo, head_dir: &Path, pr: &crate::pulls_db::Pull, actor: Option<i64>, u: &Update) {
+/// Returns true when a new revision was recorded.
+fn sync_head(db: &Db, data: &Path, head_repo: &Repo, head_dir: &Path, pr: &crate::pulls_db::Pull, actor: Option<i64>, u: &Update) -> bool {
     if zero(&u.new) {
         let _ = db.add_event(pr.issue_id, actor, "head_deleted", &pr.head_branch, None);
-        return;
+        return false;
     }
     if u.new == pr.head_sha {
-        return;
+        return false;
     }
-    let Ok(Some(base)) = db.repo_by_id(pr.repo_id) else { return };
+    let Ok(Some(base)) = db.repo_by_id(pr.repo_id) else { return false };
     let base_dir = repo_dir(data, &base);
     let pin = format!("refs/pull/{}/head", pr.number);
     let synced = if base.id == head_repo.id {
@@ -97,12 +136,12 @@ fn sync_head(db: &Db, data: &Path, head_repo: &Repo, head_dir: &Path, pr: &crate
     };
     if let Err(e) = synced {
         eprintln!("loom: sync PR #{}: {e}", pr.number);
-        return;
+        return false;
     }
     let forced = !gitops::is_ancestor(&base_dir, &pr.head_sha, &u.new);
     let base_tip = gitops::branch_sha(&base_dir, &pr.base_branch).unwrap_or_default();
     let base_sha = gitops::merge_base(&base_dir, &base_tip, &u.new).unwrap_or_default();
-    let Ok(n) = db.add_revision(pr.issue_id, &u.new, &base_sha, forced, actor) else { return };
+    let Ok(n) = db.add_revision(pr.issue_id, &u.new, &base_sha, forced, actor) else { return false };
     let count = if forced { 0 } else { gitops::rev_list(&base_dir, &pr.head_sha, &u.new, 1000).len() };
     let _ = db.add_event(
         pr.issue_id,
@@ -111,6 +150,7 @@ fn sync_head(db: &Db, data: &Path, head_repo: &Repo, head_dir: &Path, pr: &crate
         &format!("{n}\t{}\t{}\t{count}", u.new, if forced { "force" } else { "" }),
         Some(&format!("rev:{}:{n}", pr.issue_id)),
     );
+    true
 }
 
 /// Commits newly on the default branch: `#N` adds a reference, `fixes #N` closes.

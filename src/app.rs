@@ -81,6 +81,10 @@ impl App {
         })
     }
 
+    pub fn bus(&self) -> crate::events::Bus<'_> {
+        crate::events::Bus { db: &self.db, url: &self.url }
+    }
+
     /// Password login with per-user throttling. Slow (argon2): run off the async thread.
     pub fn login(&self, name: &str, password: &str) -> Login {
         let key = name.to_ascii_lowercase();
@@ -154,13 +158,25 @@ impl App {
         let dir = self.repo_dir(&repo);
         if dir.exists() {
             // Adopt an existing bare repo dropped on disk.
+            self.auto_watch(by, &repo);
             return Ok(repo);
         }
         if let Err(e) = git::init_bare(&dir) {
             let _ = self.db.delete_repo(id);
             return Err(e);
         }
+        self.auto_watch(by, &repo);
         Ok(repo)
+    }
+
+    /// Creator and (user) owner watch new repos.
+    fn auto_watch(&self, by: Option<&User>, repo: &Repo) {
+        if let Some(u) = by {
+            let _ = self.db.watch(u.id, repo.id);
+        }
+        if let Ok(Some(owner)) = self.db.user_by_name(&repo.owner) {
+            let _ = self.db.watch(owner.id, repo.id);
+        }
     }
 
     /// Fork `src` into `owner/name`. Hardlinked objects: near-zero extra disk. Blocking.
@@ -173,6 +189,7 @@ impl App {
             let _ = self.db.delete_repo(id);
             return Err(e);
         }
+        self.auto_watch(Some(by), &repo);
         Ok(repo)
     }
 
@@ -245,6 +262,7 @@ impl App {
     pub fn receive_pack_setup(&self, cmd: &mut tokio::process::Command, repo: &Repo, user: Option<&User>) {
         cmd.arg("-c").arg(format!("core.hooksPath={}", self.data.join("hooks").display()));
         cmd.env("LOOM_DATA", &self.data);
+        cmd.env("LOOM_URL", &self.url);
         cmd.env("LOOM_REPO_ID", repo.id.to_string());
         cmd.env("LOOM_USER", user.map_or("", |u| u.name.as_str()));
         cmd.env("LOOM_BIN", &self.bin);

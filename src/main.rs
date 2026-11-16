@@ -1,6 +1,8 @@
+mod api;
 mod app;
 mod cli;
 mod db;
+mod events;
 mod git;
 mod githttp;
 mod gitops;
@@ -10,10 +12,13 @@ mod issues_web;
 mod pulls_db;
 mod pulls_web;
 mod refs;
+mod social_db;
+mod social_web;
 mod ssh;
 mod ui;
 mod ui_issues;
 mod ui_pulls;
+mod ui_social;
 mod web;
 
 use std::sync::Arc;
@@ -95,6 +100,8 @@ fn main() {
 
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         tokio::spawn(trim_heap_periodically());
+
+        tokio::spawn(events::run_deliveries(app.clone()));
 
         let router = web::router(app);
         let shutdown = async {

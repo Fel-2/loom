@@ -220,6 +220,101 @@ CREATE INDEX review_comments_issue ON review_comments(issue_id);
 ALTER TABLE protected_branches ADD COLUMN require_pr INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// v5: webhooks + delivery queue, commit statuses, required checks,
+/// watches, notifications, activity, full-text search over issues/comments.
+const SCHEMA_V5: &str = "
+CREATE TABLE webhooks (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    secret TEXT NOT NULL DEFAULT '',
+    events TEXT NOT NULL DEFAULT '*',
+    active INTEGER NOT NULL DEFAULT 1,
+    created INTEGER NOT NULL
+);
+CREATE TABLE hook_deliveries (
+    id INTEGER PRIMARY KEY,
+    hook_id INTEGER NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+    event TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_try INTEGER NOT NULL,
+    status INTEGER,
+    response TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER,
+    done INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL
+);
+CREATE INDEX hook_deliveries_due ON hook_deliveries(done, next_try);
+CREATE INDEX hook_deliveries_hook ON hook_deliveries(hook_id, id DESC);
+CREATE TABLE statuses (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    context TEXT NOT NULL,
+    state TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    target_url TEXT NOT NULL DEFAULT '',
+    creator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created INTEGER NOT NULL
+);
+CREATE INDEX statuses_sha ON statuses(repo_id, sha, context, id);
+ALTER TABLE protected_branches ADD COLUMN required_checks TEXT NOT NULL DEFAULT '';
+CREATE TABLE watches (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, repo_id)
+);
+CREATE INDEX watches_repo ON watches(repo_id);
+INSERT OR IGNORE INTO watches (user_id, repo_id)
+    SELECT u.id, r.id FROM repos r JOIN users u ON u.name = r.owner AND u.is_org = 0;
+CREATE TABLE notifications (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    unread INTEGER NOT NULL DEFAULT 1,
+    updated INTEGER NOT NULL,
+    UNIQUE (user_id, issue_id)
+);
+CREATE INDEX notifications_user ON notifications(user_id, unread, updated DESC);
+CREATE TABLE activity (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '',
+    created INTEGER NOT NULL
+);
+CREATE INDEX activity_repo ON activity(repo_id, id DESC);
+CREATE VIRTUAL TABLE issues_fts USING fts5(title, body, content='issues', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+CREATE TRIGGER issues_fts_ai AFTER INSERT ON issues BEGIN
+    INSERT INTO issues_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+CREATE TRIGGER issues_fts_ad AFTER DELETE ON issues BEGIN
+    INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+END;
+CREATE TRIGGER issues_fts_au AFTER UPDATE OF title, body ON issues BEGIN
+    INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', old.id, old.title, old.body);
+    INSERT INTO issues_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+INSERT INTO issues_fts(issues_fts) VALUES ('rebuild');
+CREATE VIRTUAL TABLE comments_fts USING fts5(body, content='comments', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+CREATE TRIGGER comments_fts_ai AFTER INSERT ON comments BEGIN
+    INSERT INTO comments_fts(rowid, body) VALUES (new.id, new.body);
+END;
+CREATE TRIGGER comments_fts_ad AFTER DELETE ON comments BEGIN
+    INSERT INTO comments_fts(comments_fts, rowid, body) VALUES ('delete', old.id, old.body);
+END;
+CREATE TRIGGER comments_fts_au AFTER UPDATE OF body ON comments BEGIN
+    INSERT INTO comments_fts(comments_fts, rowid, body) VALUES ('delete', old.id, old.body);
+    INSERT INTO comments_fts(rowid, body) VALUES (new.id, new.body);
+END;
+INSERT INTO comments_fts(comments_fts) VALUES ('rebuild');
+";
+
 pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
     ("bug", "#d73a4a", "Something is broken"),
     ("enhancement", "#84b6eb", "New feature or request"),
@@ -233,7 +328,7 @@ pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
 pub const SESSION_DAYS: i64 = 30;
 
 /// Names that would collide with top-level routes.
-const RESERVED: &[&str] = &["static", "login", "logout", "settings", "new", "admin", "api", "explore"];
+const RESERVED: &[&str] = &["static", "login", "logout", "settings", "new", "admin", "api", "explore", "search", "notifications"];
 
 pub fn now() -> i64 {
     std::time::SystemTime::now()
@@ -257,6 +352,8 @@ pub struct User {
     pub name: String,
     pub email: String,
     pub is_admin: bool,
+    /// Unread notifications (filled in for the signed-in viewer only).
+    pub unread: i64,
 }
 
 pub struct SshKey {
@@ -299,6 +396,8 @@ pub struct Protection {
     pub allow_force_push: bool,
     pub allow_delete: bool,
     pub require_pr: bool,
+    /// Status contexts that must be "success" on a PR's head before merging.
+    pub required_checks: Vec<String>,
 }
 
 /// A user or an org (they share one namespace).
@@ -371,7 +470,7 @@ fn burn_password_check(pw: &str) {
 }
 
 fn user_row(r: &rusqlite::Row<'_>) -> Result<User> {
-    Ok(User { id: r.get(0)?, name: r.get(1)?, email: r.get(2)?, is_admin: r.get(3)? })
+    Ok(User { id: r.get(0)?, name: r.get(1)?, email: r.get(2)?, is_admin: r.get(3)?, unread: 0 })
 }
 
 fn repo_row(r: &rusqlite::Row<'_>) -> Result<Repo> {
@@ -408,6 +507,9 @@ impl Db {
         }
         if v < 4 {
             c.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
+        }
+        if v < 5 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
         }
         Ok(Db(Mutex::new(c)))
     }
@@ -754,21 +856,31 @@ impl Db {
     pub fn protections(&self, repo_id: i64) -> Result<Vec<Protection>> {
         let c = self.c();
         let mut st = c.prepare(
-            "SELECT branch, allow_force_push, allow_delete, require_pr FROM protected_branches WHERE repo_id = ?1 ORDER BY branch",
+            "SELECT branch, allow_force_push, allow_delete, require_pr, required_checks FROM protected_branches
+             WHERE repo_id = ?1 ORDER BY branch",
         )?;
         st.query_map([repo_id], |r| {
-            Ok(Protection { branch: r.get(0)?, allow_force_push: r.get(1)?, allow_delete: r.get(2)?, require_pr: r.get(3)? })
+            let checks: String = r.get(4)?;
+            Ok(Protection {
+                branch: r.get(0)?,
+                allow_force_push: r.get(1)?,
+                allow_delete: r.get(2)?,
+                require_pr: r.get(3)?,
+                required_checks: checks.split(',').map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned).collect(),
+            })
         })?
         .collect()
     }
 
     pub fn set_protection(&self, repo_id: i64, p: &Protection) -> Result<()> {
         self.c().execute(
-            "INSERT INTO protected_branches (repo_id, branch, allow_force_push, allow_delete, require_pr) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO protected_branches (repo_id, branch, allow_force_push, allow_delete, require_pr, required_checks)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (repo_id, branch) DO UPDATE SET allow_force_push = excluded.allow_force_push,
                                                          allow_delete = excluded.allow_delete,
-                                                         require_pr = excluded.require_pr",
-            params![repo_id, p.branch, p.allow_force_push, p.allow_delete, p.require_pr],
+                                                         require_pr = excluded.require_pr,
+                                                         required_checks = excluded.required_checks",
+            params![repo_id, p.branch, p.allow_force_push, p.allow_delete, p.require_pr, p.required_checks.join(",")],
         )?;
         Ok(())
     }

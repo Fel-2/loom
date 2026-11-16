@@ -95,6 +95,25 @@ fn head_markup(app: &App, ctx: &Ctx, issue: &Issue, pull: &Pull, tab: PrTab, dif
     uip::head(&uip::HeadInfo { base: &base, issue, pull, head_label: &h.label, commits: diff.commits.len(), files, revisions }, tab)
 }
 
+/// Required status contexts on the base branch that aren't green on the head.
+fn failing_checks(app: &App, repo: &Repo, pull: &Pull) -> (Vec<crate::social_db::Status>, Vec<String>, Vec<String>) {
+    let statuses = app.db.statuses(repo.id, &pull.head_sha).unwrap_or_default();
+    let required: Vec<String> = app
+        .db
+        .protections(repo.id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.branch == pull.base_branch)
+        .map(|p| p.required_checks)
+        .unwrap_or_default();
+    let failing = required
+        .iter()
+        .filter(|c| !statuses.iter().any(|s| &s.context == *c && s.state == "success"))
+        .cloned()
+        .collect();
+    (statuses, required, failing)
+}
+
 fn mergeable(dir: &std::path::Path, pull: &Pull) -> Mergeable {
     let Some(tip) = gitops::branch_sha(dir, &pull.base_branch) else {
         return Mergeable::Unknown(format!("base branch '{}' no longer exists", pull.base_branch));
@@ -131,6 +150,9 @@ fn latest_reviews(reviews: &[crate::pulls_db::Review]) -> Vec<(String, String)> 
 pub fn render_pull(app: &Arc<App>, ctx: &Ctx, issue: Issue, msg: Option<&str>, err: Option<&str>) -> Res {
     let pull = app.db.pull(ctx.repo.id, issue.number)?.ok_or(Err::NotFound)?;
     let viewer = ctx.viewer.as_ref();
+    if let Some(u) = viewer {
+        let _ = app.db.mark_read(u.id, issue.id);
+    }
     let mut parts = issues_web::issue_parts(app, ctx, &issue)?;
     let refs = Refs { app, viewer, repo: &ctx.repo, git: crate::git::open(&ctx.dir).ok() };
     let pbase = format!("{}/pulls/{}", ctx.base(), issue.number);
@@ -158,12 +180,21 @@ pub fn render_pull(app: &Arc<App>, ctx: &Ctx, issue: Issue, msg: Option<&str>, e
         app.db.access(viewer, r).is_ok_and(|a| a >= Access::Write) && !(r.id == ctx.repo.id && pull.head_branch == pull.base_branch)
     });
     let state = if issue.closed { Mergeable::Unknown(String::new()) } else { mergeable(&ctx.dir, &pull) };
+    let (statuses, required, failing) = failing_checks(app, &ctx.repo, &pull);
+    let blocked = if !failing.is_empty() {
+        Some(format!("Required checks must pass first: {}.", failing.join(", ")))
+    } else if !triage && !issue.closed {
+        Some("Only people with write access can merge.".into())
+    } else {
+        None
+    };
     let mb = uip::MergeBox {
         pbase: &pbase,
         pull: &pull,
         state,
-        can_merge: triage && !ctx.repo.archived,
-        blocked_reason: if !triage && !issue.closed { Some("Only people with write access can merge.".into()) } else { None },
+        can_merge: triage && !ctx.repo.archived && failing.is_empty(),
+        blocked_reason: blocked,
+        checks: crate::ui_social::statuses(&statuses, &required),
         can_delete_branch,
         head_exists,
         approvals: latest.iter().filter(|(_, s)| s == "approve").count(),
@@ -482,6 +513,9 @@ async fn create(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(St
         unstage(&ctx, &head_repo, &head_branch);
         if let Some(issue) = app.db.issue(ctx.repo.id, number)? {
             issues_web::record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
+            if let Some(p) = app.db.pull(ctx.repo.id, number)? {
+                crate::events::emit(&app.bus(), crate::events::Ev::Pull { repo: &ctx.repo, actor: Some(&u), issue: &issue, pull: &p, action: "opened" });
+            }
         }
         let _ = issue_id;
         Ok(see_other(&format!("{}/pulls/{number}", ctx.base())))
@@ -519,6 +553,8 @@ async fn review(State(app): St, Authed(u): Authed, Path((owner, name, number)): 
         }
         app.db.add_review(issue.id, u.id, &f.state, f.body.trim(), &pull.head_sha)?;
         issues_web::record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
+        let state = match f.state.as_str() { "approve" => "approved", "changes" => "changes_requested", _ => "commented" };
+        crate::events::emit(&app.bus(), crate::events::Ev::Review { repo: &ctx.repo, actor: &u, issue: &issue, pull: &pull, state, body: f.body.trim() });
         Ok(see_other(&format!("{}/pulls/{number}", ctx.base())))
     })
     .await
@@ -607,6 +643,10 @@ fn do_merge(app: &App, ctx: &Ctx, u: &User, issue: &Issue, pull: &Pull, f: &Merg
     if f.expected_head != pull.head_sha {
         return Err("The pull request changed while you were looking at it. Review the new commits, then merge.".into());
     }
+    let (_, _, failing) = failing_checks(app, &ctx.repo, pull);
+    if !failing.is_empty() {
+        return Err(format!("Required checks must pass first: {}.", failing.join(", ")));
+    }
     let dir = &ctx.dir;
     let base_ref = format!("refs/heads/{}", pull.base_branch);
     let tip = gitops::branch_sha(dir, &pull.base_branch).ok_or("The base branch no longer exists.")?;
@@ -652,9 +692,9 @@ fn do_merge(app: &App, ctx: &Ctx, u: &User, issue: &Issue, pull: &Pull, f: &Merg
         _ => return Err("Unknown merge strategy.".into()),
     };
     gitops::update_ref(dir, &base_ref, &new, Some(&tip)).map_err(|_| "The base branch moved during the merge; try again.".to_string())?;
-    hooks::merged(&app.db, &ctx.repo, pull, Some(u.id), &new, &f.strategy);
+    hooks::merged(&app.db, &app.url, &ctx.repo, pull, Some(u), &new, &f.strategy);
     let up = hooks::Update { old: tip, new, refname: base_ref };
-    hooks::after_update(&app.db, &app.data, &ctx.repo, Some(u), &[up]);
+    hooks::after_update(&app.db, &app.data, &app.url, &ctx.repo, Some(u), &[up]);
     Ok(())
 }
 

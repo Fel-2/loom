@@ -161,7 +161,7 @@ fn back(ctx: &Ctx, i: &Issue) -> Response {
 }
 
 /// Parse an urlencoded body allowing repeated keys.
-fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
+pub fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
     fn dec(s: &str) -> String {
         let b = s.as_bytes();
         let mut out = Vec::with_capacity(b.len());
@@ -291,6 +291,7 @@ async fn create(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(St
     let (_, number) = app.db.create_issue(ctx.repo.id, u.id, f.title.trim(), &f.body, false)?;
     if let Some(issue) = app.db.issue(ctx.repo.id, number)? {
         record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
+        crate::events::emit(&app.bus(), crate::events::Ev::Issue { repo: &ctx.repo, actor: &u, issue: &issue, action: "opened" });
     }
     Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
 }
@@ -299,6 +300,9 @@ async fn create(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(St
 
 pub fn render_issue(app: &Arc<App>, ctx: &Ctx, number: i64, msg: Option<&str>, err: Option<&str>) -> Res {
     let issue = load_issue(app, ctx, number)?;
+    if let Some(u) = &ctx.viewer {
+        let _ = app.db.mark_read(u.id, issue.id);
+    }
     if issue.is_pr {
         return crate::pulls_web::render_pull(app, ctx, issue, msg, err);
     }
@@ -406,17 +410,23 @@ async fn comment(State(app): St, Authed(u): Authed, Path((owner, name, number)):
     if !f.body.trim().is_empty() {
         app.db.add_comment(issue.id, u.id, &f.body)?;
         record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
+        crate::events::emit(&app.bus(), crate::events::Ev::Comment { repo: &ctx.repo, actor: &u, issue: &issue, body: &f.body });
     } else if action == "comment" {
         return render_issue(&app, &ctx, number, None, Some("The comment is empty."));
     }
-    match action {
-        "close" => {
-            app.db.set_issue_closed(issue.id, true, Some(u.id), "closed", "", None)?;
+    let changed = match action {
+        "close" => app.db.set_issue_closed(issue.id, true, Some(u.id), "closed", "", None)?,
+        "reopen" => app.db.set_issue_closed(issue.id, false, Some(u.id), "reopened", "", None)?,
+        _ => false,
+    };
+    if changed {
+        let ev_action = if action == "close" { "closed" } else { "reopened" };
+        if let Some(fresh) = app.db.issue(ctx.repo.id, number)? {
+            match app.db.pull(ctx.repo.id, number)? {
+                Some(p) => crate::events::emit(&app.bus(), crate::events::Ev::Pull { repo: &ctx.repo, actor: Some(&u), issue: &fresh, pull: &p, action: ev_action }),
+                None => crate::events::emit(&app.bus(), crate::events::Ev::Issue { repo: &ctx.repo, actor: &u, issue: &fresh, action: ev_action }),
+            }
         }
-        "reopen" => {
-            app.db.set_issue_closed(issue.id, false, Some(u.id), "reopened", "", None)?;
-        }
-        _ => {}
     }
     Ok(back(&ctx, &issue))
 }
@@ -471,6 +481,9 @@ async fn assign(State(app): St, Authed(u): Authed, Path((owner, name, number)): 
             return render_issue(&app, &ctx, number, None, Some(&format!("{} can't see this repository.", t.name)));
         }
         app.db.add_assignee(issue.id, t.id, &t.name, u.id)?;
+        if t.id != u.id {
+            let _ = app.db.notify(t.id, ctx.repo.id, issue.id, "assigned", Some(u.id));
+        }
     }
     if let Some(n) = f.remove.as_deref() {
         app.db.remove_assignee(issue.id, n, u.id)?;

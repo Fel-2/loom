@@ -151,7 +151,8 @@ fn hook_post_receive() -> Result<(), String> {
             Some(crate::hooks::Update { old: it.next()?.to_owned(), new: it.next()?.to_owned(), refname: it.next()?.to_owned() })
         })
         .collect();
-    crate::hooks::after_update(&db, &data, &repo, pusher.as_ref(), &updates);
+    let url = std::env::var("LOOM_URL").unwrap_or_default();
+    crate::hooks::after_update(&db, &data, &url, &repo, pusher.as_ref(), &updates);
     Ok(())
 }
 
@@ -265,7 +266,7 @@ fn repo_adopt(app: &App) -> Result<(), String> {
 }
 
 fn repo_list(app: &App) -> Result<(), String> {
-    let admin = db::User { id: 0, name: String::new(), email: String::new(), is_admin: true };
+    let admin = db::User { id: 0, name: String::new(), email: String::new(), is_admin: true, unread: 0 };
     for r in app.db.visible_repos(Some(&admin), None).map_err(|e| e.to_string())? {
         println!("{}/{}{}", r.owner, r.name, if r.private { "  private" } else { "" });
     }

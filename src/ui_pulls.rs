@@ -71,6 +71,8 @@ pub struct MergeBox<'a> {
     pub head_exists: bool,
     pub approvals: usize,
     pub changes_requested: usize,
+    /// Rendered commit statuses for the head.
+    pub checks: Markup,
 }
 
 pub fn merge_box(m: &MergeBox<'_>) -> Markup {
@@ -96,6 +98,7 @@ pub fn merge_box(m: &MergeBox<'_>) -> Markup {
             } @else if p.closed {
                 div.mb-row { span.big.muted { "✕" } div { strong { "Closed without merging" } } }
             } @else {
+                (m.checks)
                 @if m.approvals > 0 || m.changes_requested > 0 {
                     div.mb-row.small {
                         @if m.approvals > 0 { span.verdict.ok { "✓ " (m.approvals) " approval" @if m.approvals != 1 { "s" } } }

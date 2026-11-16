@@ -79,7 +79,10 @@ fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 impl FromRequestParts<Arc<App>> for Viewer {
     type Rejection = std::convert::Infallible;
     async fn from_request_parts(parts: &mut Parts, app: &Arc<App>) -> Result<Self, Self::Rejection> {
-        let user = cookie(&parts.headers, COOKIE).and_then(|raw| app.db.session_user(raw).ok().flatten());
+        let mut user = cookie(&parts.headers, COOKIE).and_then(|raw| app.db.session_user(raw).ok().flatten());
+        if let Some(u) = &mut user {
+            u.unread = app.db.unread_count(u.id).unwrap_or(0);
+        }
         Ok(Viewer(user))
     }
 }
@@ -191,6 +194,10 @@ impl Ctx {
             can_admin: access >= Access::Admin,
             open_issues: app.db.open_count(repo.id, false)?,
             open_pulls: app.db.open_count(repo.id, true)?,
+            watching: match &viewer {
+                Some(u) => Some(app.db.watching(u.id, repo.id)?),
+                None => None,
+            },
         };
         Ok(Ctx { viewer, repo, access, dir, http, ssh, meta })
     }
@@ -200,7 +207,7 @@ impl Ctx {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (&self.repo.owner, &self.repo.name, &self.repo.description, self.repo.private, self.repo.archived).hash(&mut h);
-        (self.meta.stars, self.meta.starred, self.meta.forks, &self.meta.parent, self.meta.can_admin, self.meta.open_issues, self.meta.open_pulls).hash(&mut h);
+        (self.meta.stars, self.meta.starred, self.meta.forks, &self.meta.parent, self.meta.can_admin, self.meta.open_issues, self.meta.open_pulls, self.meta.watching).hash(&mut h);
         h.finish()
     }
 
@@ -229,6 +236,10 @@ impl Ctx {
 
 async fn index(State(app): St, Viewer(v): Viewer) -> Res {
     let repos = app.db.visible_repos(v.as_ref(), None)?;
+    if let Some(u) = &v {
+        let feed = app.db.activity(Some(u), Some(u.id), None, 50)?;
+        return Ok(ui::page("dashboard", Some(u), crate::ui_social::dashboard(&u.name, &feed, &repos)).into_response());
+    }
     Ok(ui::page("repositories", v.as_ref(), ui::index(&repos, None)).into_response())
 }
 
@@ -237,7 +248,9 @@ async fn owner(State(app): St, Viewer(v): Viewer, Path(owner): Path<String>) -> 
     let repos = app.db.visible_repos(v.as_ref(), Some(&o.name))?;
     let (orgs, members) = if o.is_org { (Vec::new(), app.db.members(o.id)?) } else { (app.db.orgs_of(o.id)?, Vec::new()) };
     let can_admin = o.is_org && v.as_ref().is_some_and(|u| u.is_admin || app.db.org_role(&o.name, u.id).is_ok_and(|r| r == Access::Admin));
-    Ok(ui::page(&o.name, v.as_ref(), ui::owner_page(&o, &repos, &orgs, &members, can_admin)).into_response())
+    let feed = app.db.activity(v.as_ref(), None, Some(&o.name), 30)?;
+    let body = html! { (ui::owner_page(&o, &repos, &orgs, &members, can_admin)) div.mt { (crate::ui_social::activity(&feed)) } };
+    Ok(ui::page(&o.name, v.as_ref(), body).into_response())
 }
 
 async fn overview(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(String, String)>, headers: HeaderMap) -> Res {
@@ -397,11 +410,17 @@ async fn commit(State(app): St, Viewer(v): Viewer, Path((owner, name, rev)): Pat
     blocking(move || {
         let repo = ctx.open()?;
         let id = git::resolve_commit(&repo, &rev)?;
-        Ok(ctx.etag(&headers, format!("c-{id}"), || {
+        let statuses = app.db.statuses(ctx.repo.id, &id.to_string())?;
+        let stag: u64 = statuses.iter().map(|s| s.created as u64 ^ s.state.len() as u64).sum();
+        Ok(ctx.etag(&headers, format!("c-{id}-{}-{stag}", statuses.len()), || {
             let built = (|| -> Result<_, git::Error> { Ok((git::commit(&repo, id)?, git::commit_diff(&repo, id)?)) })();
             match built {
                 Ok((c, files)) => {
-                    let body = html! { (ctx.header(ui::Tab::Commits, &rev)) (ui::commit(&ctx.base(), &c, &files)) };
+                    let body = html! {
+                        (ctx.header(ui::Tab::Commits, &rev))
+                        @if !statuses.is_empty() { div.card.mb { (crate::ui_social::statuses(&statuses, &[])) } }
+                        (ui::commit(&ctx.base(), &c, &files))
+                    };
                     ctx.page(&c.summary, body)
                 }
                 Err(e) => Err::from(e).into_response(),
@@ -672,6 +691,10 @@ async fn fork_create(State(app): St, Authed(u): Authed, Path((owner, name)): Pat
 
 // ---------- repo settings (admin) ----------
 
+pub(crate) fn settings_page(app: &App, ctx: &Ctx, msg: Option<&str>, err: Option<&str>) -> Res {
+    settings_response(app, ctx, msg, err)
+}
+
 fn settings_response(app: &App, ctx: &Ctx, msg: Option<&str>, err: Option<&str>) -> Res {
     let u = ctx.viewer.as_ref().ok_or(Err::NotFound)?;
     let branches = git::branch_names(&ctx.dir);
@@ -690,7 +713,21 @@ fn settings_response(app: &App, ctx: &Ctx, msg: Option<&str>, err: Option<&str>)
         owners: &owners,
     };
     let rev = default.clone().unwrap_or_else(|| "HEAD".into());
-    let body = html! { (ctx.header(ui::Tab::Settings, &rev)) (ui::repo_settings(&ctx.repo, &data, msg, err)) };
+    let hooks: Vec<_> = app
+        .db
+        .webhooks(ctx.repo.id)?
+        .into_iter()
+        .map(|h| {
+            let last = app.db.last_delivery_status(h.id).ok().flatten();
+            (h, last)
+        })
+        .collect();
+    let sbase = format!("{}/settings", ctx.base());
+    let body = html! {
+        (ctx.header(ui::Tab::Settings, &rev))
+        (ui::repo_settings(&ctx.repo, &data, msg, err))
+        div.mt { (crate::ui_social::hooks_section(&sbase, &hooks)) }
+    };
     let status = if err.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
     Ok((status, ctx.page("settings", body)).into_response())
 }
@@ -758,6 +795,7 @@ struct ProtectF {
     allow_force_push: Option<String>,
     allow_delete: Option<String>,
     require_pr: Option<String>,
+    required_checks: Option<String>,
 }
 
 async fn settings_protect(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>, Form(f): Form<ProtectF>) -> Res {
@@ -773,6 +811,16 @@ async fn settings_protect(State(app): St, Authed(u): Authed, Path((owner, name))
         allow_force_push: f.allow_force_push.is_some(),
         allow_delete: f.allow_delete.is_some(),
         require_pr: f.require_pr.is_some(),
+        required_checks: f
+            .required_checks
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|c| !c.is_empty() && c.len() <= 100)
+            .take(20)
+            .map(str::to_owned)
+            .collect(),
     };
     app.db.set_protection(ctx.repo.id, &p)?;
     settings_response(&app, &ctx, Some(&format!("'{branch}' is protected.")), None)
@@ -970,6 +1018,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/settings/delete", post(settings_delete))
         .merge(crate::issues_web::routes())
         .merge(crate::pulls_web::routes())
+        .merge(crate::api::routes())
+        .merge(crate::social_web::routes())
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
         .with_state(app)

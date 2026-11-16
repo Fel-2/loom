@@ -31,6 +31,11 @@ Tangled, whose code is MIT; no Tangled brand assets are used).
   concurrent (mix incl. PR conversation/files/commits/revisions), 16.7 MB
   after load + trim. PR files tab with a 430 KB diff: 6 ms; conversation:
   12 ms (several git subprocesses for mergeability: a cache candidate).
+- loom M6 measured (+ webhooks, statuses, API, notifications, search):
+  10 MB idle / 1 thread (delivery worker only spawns a thread when work is
+  due), ~50 MB peak at 32 concurrent, 20 MB RSS after load + trim — of which
+  11 MB is the mapped 13.3 MB binary (file-backed, reclaimable) and 6.5 MB
+  private (heap 5.7 MB). Issue search 2 ms, API 2 ms, code search 19 ms.
 - No federation.
 - Git reads in-process via gitoxide (`gix`). Spawn `git` only for
   `upload-pack` / `receive-pack` (clone/fetch/push) and merges.
@@ -110,5 +115,5 @@ Backup = copy `loom.db` (via `.backup`) + `repos/`.
 3. **Repo management** — create/fork/settings/collaborators/orgs/visibility. ✅ (tests/m3.sh)
 4. ✅ **Issues** (tests/m4.sh)
 5. ✅ **Pull requests** (tests/m5.sh)
-6. **Webhooks, statuses, API, search, notifications**
+6. ✅ **Webhooks, statuses, API, search, notifications** (tests/m6.sh)
 7. **Benchmark harness vs Forgejo** (RSS idle/loaded, p50/p99 latency) — run early, run often.
