@@ -17,7 +17,9 @@ usage: loom [serve]
        loom repo adopt        register bare repos already on disk (public)
        loom repo list
        loom version
-       loom backup <dir> [--repos]
+       loom doctor               check this machine is ready to run loom
+       loom backup <dir> [--repos] [--keep N]
+       loom restore <backup.db> [--repos <dir>] [--force]
        loom mail flush          (send queued notifications via LOOM_MAIL_CMD)
        loom lfs gc [--dry-run] [--repo owner/name]
        loom repo maintain     write commit-graphs for all repos (speeds up history)
@@ -70,6 +72,12 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
     }
     if a[0] == "backup" {
         return Some(backup(a.get(1).copied(), &args[2..]));
+    }
+    if a[0] == "doctor" {
+        return Some(doctor());
+    }
+    if a[0] == "restore" {
+        return Some(restore(a.get(1).copied(), &args[2..]));
     }
     if a[0] == "hook" {
         return Some(match a.get(1).copied() {
@@ -362,6 +370,7 @@ fn backup(dir: Option<&str>, args: &[String]) -> Result<(), String> {
     let file = dest.join(format!("loom-{stamp}.db"));
     db.backup_to(&file).map_err(|e| e.to_string())?;
     println!("database -> {}", file.display());
+    let keep: Option<usize> = opt(args, "--keep").and_then(|v| v.parse().ok());
     if args.iter().any(|a| a == "--repos") {
         let out = std::process::Command::new("cp")
             .args(["-a", "--reflink=auto"])
@@ -376,5 +385,154 @@ fn backup(dir: Option<&str>, args: &[String]) -> Result<(), String> {
     } else {
         println!("(metadata only; add --repos to copy the repositories too)");
     }
+    if let Some(n) = keep.filter(|n| *n > 0) {
+        rotate(&dest, n)?;
+    }
+    Ok(())
+}
+
+/// Keep the newest `n` backup sets (a loom-<stamp>.db and its repos-<stamp>).
+fn rotate(dest: &std::path::Path, n: usize) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    let mut sets: BTreeMap<String, (Option<std::path::PathBuf>, Option<std::path::PathBuf>)> = BTreeMap::new();
+    for e in std::fs::read_dir(dest).map_err(|e| e.to_string())?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let stamp = name
+            .strip_prefix("loom-")
+            .and_then(|r| r.strip_suffix(".db"))
+            .or_else(|| name.strip_prefix("repos-"))
+            .map(str::to_owned);
+        if let Some(st) = stamp {
+            let slot = sets.entry(st).or_default();
+            if name.starts_with("loom-") {
+                slot.0 = Some(e.path());
+            } else {
+                slot.1 = Some(e.path());
+            }
+        }
+    }
+    let excess = sets.len().saturating_sub(n);
+    for (_, (db, repos)) in sets.into_iter().take(excess) {
+        for p in [db, repos].into_iter().flatten() {
+            if p.is_dir() {
+                let _ = std::fs::remove_dir_all(&p);
+            } else {
+                let _ = std::fs::remove_file(&p);
+            }
+            println!("rotated out {}", p.display());
+        }
+    }
+    Ok(())
+}
+
+/// Pre-flight checks for a new machine; never modifies anything.
+fn doctor() -> Result<(), String> {
+    let data = std::path::PathBuf::from(std::env::var_os("LOOM_DATA").unwrap_or_else(|| "./data".into()));
+    let mut bad = 0;
+    let mut say = |ok: bool, label: &str, detail: String| {
+        println!("{} {label:<22} {detail}", if ok { "ok  " } else { "FAIL" });
+        if !ok {
+            bad += 1;
+        }
+    };
+    say(true, "version", format!("loom {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH));
+    match std::process::Command::new("git").arg("--version").output() {
+        Ok(o) if o.status.success() => say(true, "git", String::from_utf8_lossy(&o.stdout).trim().to_owned()),
+        _ => say(false, "git", "not found in PATH (git is required for clones, pushes, merges)".into()),
+    }
+    let writable = std::fs::create_dir_all(&data).is_ok()
+        && std::fs::write(data.join(".doctor"), b"x").is_ok()
+        && std::fs::remove_file(data.join(".doctor")).is_ok();
+    say(writable, "data directory", format!("{} ({})", data.display(), if writable { "writable" } else { "NOT writable" }));
+    if let Ok(v) = std::fs::metadata(&data) {
+        let _ = v;
+        if let Ok(out) = std::process::Command::new("df").args(["-Pk"]).arg(&data).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = text.lines().nth(1) {
+                let free: u64 = line.split_whitespace().nth(3).and_then(|v| v.parse().ok()).unwrap_or(0);
+                say(free > 1024 * 1024, "free space", format!("{:.1} GB under {}", free as f64 / 1048576.0, data.display()));
+            }
+        }
+    }
+    let addr = std::env::var("LOOM_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
+    let free = std::net::TcpListener::bind(&addr).is_ok();
+    say(free, "http address", format!("{addr} is {}", if free { "free" } else { "IN USE by something else" }));
+    let ssh = std::env::var("LOOM_SSH_ADDR").unwrap_or_else(|_| "127.0.0.1:2222".into());
+    if ssh == "off" {
+        say(true, "ssh address", "disabled".into());
+    } else {
+        let free = std::net::TcpListener::bind(&ssh).is_ok();
+        say(free, "ssh address", format!("{ssh} is {}", if free { "free" } else { "IN USE by something else" }));
+    }
+    match std::env::var("LOOM_URL") {
+        Ok(u) if u.starts_with("http://") || u.starts_with("https://") => say(true, "public url", u),
+        Ok(u) => say(false, "public url", format!("{u} should start with http:// or https://")),
+        Err(_) => say(true, "public url", "not set (defaults to LOOM_ADDR; set it for clone links on a LAN)".into()),
+    }
+    if let Ok(db) = db::Db::open(&data.join("loom.db")) {
+        let users = db.users().map(|u| u.len()).unwrap_or(0);
+        let repos = db.repo_count_total().unwrap_or(0);
+        say(true, "database", format!("schema v{}, {users} users, {repos} repositories", db.schema_version()));
+    } else {
+        say(true, "database", "not created yet (first run makes it)".into());
+    }
+    if bad > 0 {
+        return Err(format!("{bad} check(s) failed"));
+    }
+    println!("\nAll good. Start it with: loom serve");
+    Ok(())
+}
+
+/// Restore a backup made by `loom backup`. Refuses to overwrite unless --force.
+fn restore(src: Option<&str>, args: &[String]) -> Result<(), String> {
+    let src = std::path::PathBuf::from(src.ok_or("usage: loom restore <backup.db> [--repos <dir>] [--force]")?);
+    let data = std::path::PathBuf::from(std::env::var_os("LOOM_DATA").unwrap_or_else(|| "./data".into()));
+    let force = args.iter().any(|a| a == "--force");
+    let repos = opt(args, "--repos").map(std::path::PathBuf::from);
+    if !src.is_file() {
+        return Err(format!("{}: no such file", src.display()));
+    }
+    // Verify before touching anything.
+    let check = db::Db::open(&src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let users = check.users().map(|u| u.len()).unwrap_or(0);
+    let repos_n = check.repo_count_total().unwrap_or(0);
+    drop(check);
+    println!("backup: {} users, {} repositories, schema v{}", users, repos_n, {
+        let d = db::Db::open(&src).map_err(|e| e.to_string())?;
+        d.schema_version()
+    });
+    std::fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+    let target = data.join("loom.db");
+    if target.exists() && !force {
+        return Err(format!("{} already exists; stop loom and pass --force to replace it", target.display()));
+    }
+    let tmp = data.join("loom.db.restore");
+    std::fs::copy(&src, &tmp).map_err(|e| format!("copy: {e}"))?;
+    std::fs::rename(&tmp, &target).map_err(|e| format!("move: {e}"))?;
+    // WAL/SHM from the old database must not survive.
+    let _ = std::fs::remove_file(data.join("loom.db-wal"));
+    let _ = std::fs::remove_file(data.join("loom.db-shm"));
+    println!("database -> {}", target.display());
+    if let Some(r) = repos {
+        if !r.is_dir() {
+            return Err(format!("{}: no such directory", r.display()));
+        }
+        let dst = data.join("repos");
+        // Replace, don't merge: git object directories are read-only, so
+        // copying into an existing tree fails on mode.
+        if dst.exists() {
+            std::fs::remove_dir_all(&dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        }
+        std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+        // Copy the *contents* into data/repos (cp -a dir dst would nest it).
+        let mut src = r.clone();
+        src.push(".");
+        let out = std::process::Command::new("cp").args(["-a", "--reflink=auto"]).arg(&src).arg(&dst).output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        println!("repositories -> {}", dst.display());
+    }
+    println!("done. Start loom with LOOM_DATA={}", data.display());
     Ok(())
 }

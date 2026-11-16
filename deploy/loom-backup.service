@@ -1,0 +1,9 @@
+# Daily backup as a user timer. Installed by deploy/install.sh.
+[Unit]
+Description=loom backup
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/loom backup %h/.local/share/loom/backups --repos --keep 7
+Environment=LOOM_DATA=%h/.local/share/loom
+EnvironmentFile=-%h/.config/loom/env

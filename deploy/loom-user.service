@@ -1,0 +1,21 @@
+# User-level unit: no root, starts at login and (with lingering) at boot.
+# Install: copy to ~/.config/systemd/user/loom.service
+#   systemctl --user daemon-reload && systemctl --user enable --now loom
+#   loginctl enable-linger "$USER"   # keep it running after logout
+[Unit]
+Description=loom git forge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/loom serve
+EnvironmentFile=-%h/.config/loom/env
+Environment=LOOM_DATA=%h/.local/share/loom
+Environment=LOOM_ADDR=0.0.0.0:3000
+Environment=LOOM_SSH_ADDR=0.0.0.0:2222
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

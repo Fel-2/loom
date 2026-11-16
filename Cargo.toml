@@ -45,3 +45,6 @@ debug = "line-tables-only"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"

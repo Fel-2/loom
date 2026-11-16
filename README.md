@@ -1,6 +1,7 @@
 # loom
 
-A self-hosted git forge in one small Rust binary. No federation, no Redis, no
+A self-hosted git forge in one small Rust binary. Personal/LAN use on an old
+laptop: see **[docs/home-laptop.md](docs/home-laptop.md)**. No federation, no Redis, no
 job queue, no separate database server: SQLite and git, nothing else.
 
 Measured against Forgejo 15.0.6 with SQLite on the same data (83k-commit
@@ -80,9 +81,14 @@ Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 
 ## Deploy
 
-- **Container**: `docker compose up -d` (Dockerfile is two-stage; the runtime
-  image carries git). First admin:
-  `docker compose exec loom loom user add you --admin --password-stdin`.
+- **Home laptop (personal, LAN, no root)**: `./scripts/dist.sh` builds a
+  static binary tarball; `./deploy/install.sh` on the laptop installs it under
+  `~/.local` with a systemd user unit and a daily backup timer. Full guide:
+  **[docs/home-laptop.md](docs/home-laptop.md)**.
+- **Container (podman)**: `podman build -t loom .` then
+  `podman run -d --name loom -p 3000:3000 -p 2222:2222 -v ./data:/data:Z -e LOOM_URL=http://localhost:3000 loom`
+  (or `podman-compose up -d`). The runtime image carries git. First admin:
+  `podman exec -u loom loom loom user add you --admin --password-stdin`.
   The container runs as uid 10001, so a bind-mounted `./data` is owned by that
   uid — either `chown -R 10001 data` on the host (if you want direct access for
   backups) or use a named volume.
@@ -92,7 +98,9 @@ Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 - **Health / metrics**: `GET /healthz` (JSON, 503 when the DB or storage is
   broken) and `GET /metrics` (Prometheus text: uptime, request counters,
   in-flight requests, free git slots, RSS, threads, repo count).
-- **Maintenance**: `loom lfs gc [--dry-run]` deletes LFS objects no longer
+- **Maintenance**: `loom doctor` (is this machine ready?), `loom backup
+  <dir> --repos --keep N`, `loom restore <db> --repos <dir>`,
+  `loom lfs gc [--dry-run]` deletes LFS objects no longer
   referenced by any ref (and objects of deleted repositories);
   `loom mail flush` sends queued notifications; `loom repo maintain` rebuilds
   commit-graphs.
@@ -121,6 +129,7 @@ tests/m6.sh      # webhooks, statuses, API, notifications, search (61)
 tests/m7.sh      # highlighting, caps, blame, releases, 2FA, mirrors (48)
 tests/m8.sh      # LFS (real git-lfs), healthz, metrics, backup, version (21)
 tests/m9.sh      # templates, drafts, avatars, graph, teams, email, LFS gc, rate limits (42)
+tests/m10.sh     # doctor, backup rotation, restore round-trip, installer, static binary
 cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, ...)
 ```
 
