@@ -1,0 +1,3 @@
+# Keep builds from saturating the machine (20 cores, 15 GB RAM).
+[build]
+jobs = 6

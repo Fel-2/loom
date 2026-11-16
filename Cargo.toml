@@ -1,0 +1,43 @@
+[package]
+name = "loom"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "signal", "process", "io-util", "time"] }
+maud = { version = "0.27", features = ["axum"] }
+gix = { version = "0.90", default-features = false, features = ["revision", "blob-diff", "blame", "pack-cache-lru-static", "sha1"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+serde = { version = "1", features = ["derive"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+argon2 = "0.6"
+sha2 = "0.11"
+getrandom = "0.4"
+flate2 = "1"
+tokio-util = { version = "0.7", features = ["io"] }
+rpassword = "7"
+futures-util = { version = "0.3", default-features = false }
+base64 = "0.23"
+
+# Day-to-day optimized build: thin LTO + parallel codegen = fast, low RAM.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = true
+
+# Final/shipping build (slow, heavy): cargo build --profile dist
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
