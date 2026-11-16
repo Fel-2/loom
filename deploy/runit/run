@@ -1,0 +1,20 @@
+#!/bin/sh
+exec 2>&1
+
+[ -f ./conf ] && . ./conf
+
+: "${LOOM_USER:=loom}"
+: "${LOOM_BIN:=/usr/local/bin/loom}"
+: "${LOOM_DATA:=/var/lib/loom}"
+
+HOME=$(getent passwd "$LOOM_USER" | cut -d: -f6)
+[ -n "$HOME" ] || { echo "no such user: $LOOM_USER"; exit 1; }
+ENVF=${LOOM_ENV:-$HOME/.config/loom/env}
+[ -f "$ENVF" ] && . "$ENVF"
+
+exec chpst -u "$LOOM_USER" env HOME="$HOME" LOOM_DATA="$LOOM_DATA" \
+    LOOM_ADDR="${LOOM_ADDR:-127.0.0.1:3000}" \
+    LOOM_SSH_ADDR="${LOOM_SSH_ADDR:-127.0.0.1:2222}" \
+    LOOM_URL="${LOOM_URL:-http://127.0.0.1:3000}" \
+    ${LOOM_SSH_HOST:+LOOM_SSH_HOST="$LOOM_SSH_HOST"} \
+    "$LOOM_BIN" serve

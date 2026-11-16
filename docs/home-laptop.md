@@ -124,6 +124,28 @@ present, data directory writable, ports free, enough disk):
 LOOM_DATA=~/.local/share/loom ~/.local/bin/loom doctor
 ```
 
+### runit (Artix, Void, and other non-systemd machines)
+
+`deploy/runit/` holds a run script and a `conf`. It runs as a real user, so
+sudo to install it:
+
+```sh
+sudo mkdir -p /etc/runit/sv/loom
+sudo cp deploy/runit/run /etc/runit/sv/loom/run
+sudo chmod +x /etc/runit/sv/loom/run
+sudo sh -c 'cat > /etc/runit/sv/loom/conf <<EOF
+LOOM_USER=you
+LOOM_BIN=/home/you/.local/bin/loom
+LOOM_DATA=/home/you/.local/share/loom
+EOF'
+sudo ln -s /etc/runit/sv/loom /etc/runit/runsvdir/default/loom
+sudo sv status loom && sudo sv restart loom
+```
+
+The script sources the user's `~/.config/loom/env` afterwards, so listener
+addresses are configured in one place for both runit and manual runs. Logs go
+to runit's `svlogd`, or `ln -s /var/log/sv/loom ...` if you want a log dir.
+
 ## 4. Your first account and repository
 
 ```sh

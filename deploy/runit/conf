@@ -1,0 +1,12 @@
+# /etc/runit/sv/loom/conf -- sourced by ./run (runit, not systemd).
+#
+# The user to run as; its $HOME/.config/loom/env is sourced afterwards, so
+# LOOM_ADDR / LOOM_SSH_ADDR / LOOM_URL / LOOM_SSH_HOST usually go there.
+LOOM_USER=loom
+
+# Binary and data directory.
+LOOM_BIN=/usr/local/bin/loom
+LOOM_DATA=/var/lib/loom
+
+# Optional: a different env file.
+#LOOM_ENV=/etc/loom/env

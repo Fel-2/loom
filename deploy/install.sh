@@ -16,9 +16,12 @@ BUNIT=$HOME/.config/systemd/user/loom-backup.service
 BTIMER=$HOME/.config/systemd/user/loom-backup.timer
 
 command -v git >/dev/null || { echo "git is required: install it first"; exit 1; }
+SRC=$HERE/../loom
+[ -x "$SRC" ] || SRC=$HERE/../target/release/loom
+[ -x "$SRC" ] || { echo "no loom binary: build it with 'cargo build --release' or unpack the dist tarball"; exit 1; }
 
 mkdir -p "$PREFIX/bin" "$DATA" "$HOME/.config/loom" "$HOME/.config/systemd/user"
-install -m 755 "$HERE/../loom" "$BIN"
+install -m 755 "$SRC" "$BIN"
 install -m 644 "$HERE/loom.service" "$UNIT"
 [ -f "$HERE/loom-backup.service" ] && install -m 644 "$HERE/loom-backup.service" "$BUNIT"
 [ -f "$HERE/loom-backup.timer" ] && install -m 644 "$HERE/loom-backup.timer" "$BTIMER"
