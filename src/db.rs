@@ -59,6 +59,34 @@ CREATE TABLE collaborators (
 );
 ";
 
+/// v2: orgs (users with is_org), forks, archive, stars, branch protection.
+const SCHEMA_V2: &str = "
+ALTER TABLE users ADD COLUMN is_org INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN description TEXT NOT NULL DEFAULT '';
+CREATE TABLE org_members (
+    org_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role INTEGER NOT NULL,
+    PRIMARY KEY (org_id, user_id)
+);
+ALTER TABLE repos ADD COLUMN fork_of INTEGER REFERENCES repos(id) ON DELETE SET NULL;
+ALTER TABLE repos ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE stars (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    created INTEGER NOT NULL,
+    PRIMARY KEY (user_id, repo_id)
+);
+CREATE INDEX stars_repo ON stars(repo_id);
+CREATE TABLE protected_branches (
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch TEXT NOT NULL,
+    allow_force_push INTEGER NOT NULL DEFAULT 0,
+    allow_delete INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo_id, branch)
+);
+";
+
 pub const SESSION_DAYS: i64 = 30;
 
 /// Names that would collide with top-level routes.
@@ -109,6 +137,32 @@ pub struct Repo {
     pub name: String,
     pub description: String,
     pub private: bool,
+    pub archived: bool,
+    pub fork_of: Option<i64>,
+}
+
+pub struct Collaborator {
+    pub name: String,
+    pub access: Access,
+}
+
+pub struct Member {
+    pub name: String,
+    pub access: Access,
+}
+
+pub struct Protection {
+    pub branch: String,
+    pub allow_force_push: bool,
+    pub allow_delete: bool,
+}
+
+/// A user or an org (they share one namespace).
+pub struct Owner {
+    pub id: i64,
+    pub name: String,
+    pub is_org: bool,
+    pub description: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -120,7 +174,7 @@ pub enum Access {
 }
 
 impl Access {
-    fn from_role(r: i64) -> Self {
+    pub fn from_role(r: i64) -> Self {
         match r {
             3 => Access::Admin,
             2 => Access::Write,
@@ -177,11 +231,19 @@ fn user_row(r: &rusqlite::Row<'_>) -> Result<User> {
 }
 
 fn repo_row(r: &rusqlite::Row<'_>) -> Result<Repo> {
-    Ok(Repo { id: r.get(0)?, owner: r.get(1)?, name: r.get(2)?, description: r.get(3)?, private: r.get(4)? })
+    Ok(Repo {
+        id: r.get(0)?,
+        owner: r.get(1)?,
+        name: r.get(2)?,
+        description: r.get(3)?,
+        private: r.get(4)?,
+        archived: r.get(5)?,
+        fork_of: r.get(6)?,
+    })
 }
 
 const USER_COLS: &str = "id, name, email, is_admin";
-const REPO_COLS: &str = "id, owner, name, description, private";
+const REPO_COLS: &str = "id, owner, name, description, private, archived, fork_of";
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -193,6 +255,9 @@ impl Db {
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if v < 1 {
             c.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
+        }
+        if v < 2 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
         }
         Ok(Db(Mutex::new(c)))
     }
@@ -215,18 +280,18 @@ impl Db {
 
     pub fn user_by_name(&self, name: &str) -> Result<Option<User>> {
         self.c()
-            .query_row(&format!("SELECT {USER_COLS} FROM users WHERE name = ?1"), [name], user_row)
+            .query_row(&format!("SELECT {USER_COLS} FROM users WHERE name = ?1 AND is_org = 0"), [name], user_row)
             .optional()
     }
 
     pub fn users(&self) -> Result<Vec<User>> {
         let c = self.c();
-        let mut st = c.prepare(&format!("SELECT {USER_COLS} FROM users ORDER BY name"))?;
+        let mut st = c.prepare(&format!("SELECT {USER_COLS} FROM users WHERE is_org = 0 ORDER BY name"))?;
         st.query_map([], user_row)?.collect()
     }
 
     pub fn delete_user(&self, name: &str) -> Result<bool> {
-        Ok(self.c().execute("DELETE FROM users WHERE name = ?1", [name])? > 0)
+        Ok(self.c().execute("DELETE FROM users WHERE name = ?1 AND is_org = 0", [name])? > 0)
     }
 
     pub fn set_password(&self, user_id: i64, pw: &str) -> Result<()> {
@@ -242,7 +307,7 @@ impl Db {
     pub fn check_password(&self, name: &str, pw: &str) -> Result<Option<User>> {
         let row: Option<(User, Option<String>)> = self
             .c()
-            .query_row(&format!("SELECT {USER_COLS}, password FROM users WHERE name = ?1"), [name], |r| {
+            .query_row(&format!("SELECT {USER_COLS}, password FROM users WHERE name = ?1 AND is_org = 0"), [name], |r| {
                 Ok((user_row(r)?, r.get(4)?))
             })
             .optional()?;
@@ -397,7 +462,9 @@ impl Db {
             "SELECT {REPO_COLS} FROM repos r
              WHERE (?1 IS NULL OR r.owner = ?1)
                AND (r.private = 0 OR ?2 OR r.owner = ?3
-                    OR EXISTS (SELECT 1 FROM collaborators c WHERE c.repo_id = r.id AND c.user_id = ?4))
+                    OR EXISTS (SELECT 1 FROM collaborators c WHERE c.repo_id = r.id AND c.user_id = ?4)
+                    OR EXISTS (SELECT 1 FROM org_members m JOIN users o ON o.id = m.org_id
+                               WHERE o.name = r.owner AND m.user_id = ?4))
              ORDER BY r.owner, r.name"
         ))?;
         st.query_map(params![owner, admin, uname, uid], repo_row)?.collect()
@@ -409,19 +476,239 @@ impl Db {
         if u.is_admin || u.name.eq_ignore_ascii_case(&repo.owner) {
             return Ok(Access::Admin);
         }
+        // Highest of: collaborator role, org membership role.
         let role: Option<i64> = self
             .c()
             .query_row(
-                "SELECT role FROM collaborators WHERE repo_id = ?1 AND user_id = ?2",
-                params![repo.id, u.id],
+                "SELECT MAX(role) FROM (
+                    SELECT role FROM collaborators WHERE repo_id = ?1 AND user_id = ?2
+                    UNION ALL
+                    SELECT m.role FROM org_members m JOIN users o ON o.id = m.org_id
+                    WHERE o.name = ?3 AND o.is_org = 1 AND m.user_id = ?2)",
+                params![repo.id, u.id, repo.owner],
                 |r| r.get(0),
             )
-            .optional()?;
+            .optional()?
+            .flatten();
         Ok(role.map(Access::from_role).unwrap_or(Access::None).max(base))
     }
 
-    /// May `user` create repos under `owner`? (Orgs come later.)
+    /// May `user` create repos under `owner`? Themselves, or an org where they have write.
     pub fn can_create_under(&self, user: &User, owner: &str) -> bool {
-        user.is_admin || user.name.eq_ignore_ascii_case(owner)
+        user.is_admin
+            || user.name.eq_ignore_ascii_case(owner)
+            || self.org_role(owner, user.id).is_ok_and(|r| r >= Access::Write)
+    }
+
+    /// Owners `user` can create repos under: themselves first, then orgs.
+    pub fn creatable_owners(&self, user: &User) -> Result<Vec<String>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT o.name FROM org_members m JOIN users o ON o.id = m.org_id
+             WHERE m.user_id = ?1 AND m.role >= 2 ORDER BY o.name",
+        )?;
+        let mut v = vec![user.name.clone()];
+        v.extend(st.query_map([user.id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>>>()?);
+        Ok(v)
+    }
+
+    pub fn update_repo(&self, id: i64, description: &str, private: bool, archived: bool) -> Result<()> {
+        self.c().execute(
+            "UPDATE repos SET description = ?1, private = ?2, archived = ?3 WHERE id = ?4",
+            params![description, private, archived, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn move_repo(&self, id: i64, owner: &str, name: &str) -> Result<()> {
+        self.c().execute("UPDATE repos SET owner = ?1, name = ?2 WHERE id = ?3", params![owner, name, id])?;
+        Ok(())
+    }
+
+    pub fn set_fork_of(&self, id: i64, parent: i64) -> Result<()> {
+        self.c().execute("UPDATE repos SET fork_of = ?1 WHERE id = ?2", params![parent, id])?;
+        Ok(())
+    }
+
+    pub fn repo_by_id(&self, id: i64) -> Result<Option<Repo>> {
+        self.c()
+            .query_row(&format!("SELECT {REPO_COLS} FROM repos WHERE id = ?1"), [id], repo_row)
+            .optional()
+    }
+
+    pub fn fork_count(&self, id: i64) -> Result<i64> {
+        self.c().query_row("SELECT COUNT(*) FROM repos WHERE fork_of = ?1", [id], |r| r.get(0))
+    }
+
+    // ---- collaborators ----
+
+    pub fn collaborators(&self, repo_id: i64) -> Result<Vec<Collaborator>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT u.name, c.role FROM collaborators c JOIN users u ON u.id = c.user_id
+             WHERE c.repo_id = ?1 ORDER BY u.name",
+        )?;
+        st.query_map([repo_id], |r| Ok(Collaborator { name: r.get(0)?, access: Access::from_role(r.get(1)?) }))?
+            .collect()
+    }
+
+    pub fn set_collaborator(&self, repo_id: i64, user_id: i64, access: Access) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO collaborators (repo_id, user_id, role) VALUES (?1, ?2, ?3)
+             ON CONFLICT (repo_id, user_id) DO UPDATE SET role = excluded.role",
+            params![repo_id, user_id, access as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_collaborator(&self, repo_id: i64, name: &str) -> Result<()> {
+        self.c().execute(
+            "DELETE FROM collaborators WHERE repo_id = ?1 AND user_id = (SELECT id FROM users WHERE name = ?2)",
+            params![repo_id, name],
+        )?;
+        Ok(())
+    }
+
+    // ---- stars ----
+
+    pub fn star_count(&self, repo_id: i64) -> Result<i64> {
+        self.c().query_row("SELECT COUNT(*) FROM stars WHERE repo_id = ?1", [repo_id], |r| r.get(0))
+    }
+
+    pub fn starred(&self, user_id: i64, repo_id: i64) -> Result<bool> {
+        self.c().query_row(
+            "SELECT EXISTS (SELECT 1 FROM stars WHERE user_id = ?1 AND repo_id = ?2)",
+            params![user_id, repo_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Toggle; returns the new state.
+    pub fn toggle_star(&self, user_id: i64, repo_id: i64) -> Result<bool> {
+        let c = self.c();
+        if c.execute("DELETE FROM stars WHERE user_id = ?1 AND repo_id = ?2", params![user_id, repo_id])? > 0 {
+            return Ok(false);
+        }
+        c.execute("INSERT INTO stars (user_id, repo_id, created) VALUES (?1, ?2, ?3)", params![user_id, repo_id, now()])?;
+        Ok(true)
+    }
+
+    // ---- branch protection ----
+
+    pub fn protections(&self, repo_id: i64) -> Result<Vec<Protection>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT branch, allow_force_push, allow_delete FROM protected_branches WHERE repo_id = ?1 ORDER BY branch",
+        )?;
+        st.query_map([repo_id], |r| {
+            Ok(Protection { branch: r.get(0)?, allow_force_push: r.get(1)?, allow_delete: r.get(2)? })
+        })?
+        .collect()
+    }
+
+    pub fn set_protection(&self, repo_id: i64, p: &Protection) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO protected_branches (repo_id, branch, allow_force_push, allow_delete) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (repo_id, branch) DO UPDATE SET allow_force_push = excluded.allow_force_push,
+                                                         allow_delete = excluded.allow_delete",
+            params![repo_id, p.branch, p.allow_force_push, p.allow_delete],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_protection(&self, repo_id: i64, branch: &str) -> Result<()> {
+        self.c().execute("DELETE FROM protected_branches WHERE repo_id = ?1 AND branch = ?2", params![repo_id, branch])?;
+        Ok(())
+    }
+
+    // ---- owners & orgs ----
+
+    pub fn owner(&self, name: &str) -> Result<Option<Owner>> {
+        self.c()
+            .query_row("SELECT id, name, is_org, description FROM users WHERE name = ?1", [name], |r| {
+                Ok(Owner { id: r.get(0)?, name: r.get(1)?, is_org: r.get(2)?, description: r.get(3)? })
+            })
+            .optional()
+    }
+
+    /// Creates the org with `creator` as admin.
+    pub fn create_org(&self, name: &str, description: &str, creator: i64) -> Result<i64> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
+            "INSERT INTO users (name, description, is_org, created) VALUES (?1, ?2, 1, ?3)",
+            params![name, description, now()],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute("INSERT INTO org_members (org_id, user_id, role) VALUES (?1, ?2, 3)", params![id, creator])?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn update_org(&self, id: i64, description: &str) -> Result<()> {
+        self.c().execute("UPDATE users SET description = ?1 WHERE id = ?2 AND is_org = 1", params![description, id])?;
+        Ok(())
+    }
+
+    pub fn delete_org(&self, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM users WHERE id = ?1 AND is_org = 1", [id])?;
+        Ok(())
+    }
+
+    pub fn org_role(&self, org: &str, user_id: i64) -> Result<Access> {
+        let r: Option<i64> = self
+            .c()
+            .query_row(
+                "SELECT m.role FROM org_members m JOIN users o ON o.id = m.org_id
+                 WHERE o.name = ?1 AND o.is_org = 1 AND m.user_id = ?2",
+                params![org, user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(r.map(Access::from_role).unwrap_or(Access::None))
+    }
+
+    pub fn members(&self, org_id: i64) -> Result<Vec<Member>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT u.name, m.role FROM org_members m JOIN users u ON u.id = m.user_id
+             WHERE m.org_id = ?1 ORDER BY m.role DESC, u.name",
+        )?;
+        st.query_map([org_id], |r| Ok(Member { name: r.get(0)?, access: Access::from_role(r.get(1)?) }))?
+            .collect()
+    }
+
+    pub fn set_member(&self, org_id: i64, user_id: i64, access: Access) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO org_members (org_id, user_id, role) VALUES (?1, ?2, ?3)
+             ON CONFLICT (org_id, user_id) DO UPDATE SET role = excluded.role",
+            params![org_id, user_id, access as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_member(&self, org_id: i64, name: &str) -> Result<()> {
+        self.c().execute(
+            "DELETE FROM org_members WHERE org_id = ?1 AND user_id = (SELECT id FROM users WHERE name = ?2)",
+            params![org_id, name],
+        )?;
+        Ok(())
+    }
+
+    pub fn admin_count(&self, org_id: i64) -> Result<i64> {
+        self.c().query_row("SELECT COUNT(*) FROM org_members WHERE org_id = ?1 AND role = 3", [org_id], |r| r.get(0))
+    }
+
+    /// Orgs `user_id` belongs to.
+    pub fn orgs_of(&self, user_id: i64) -> Result<Vec<String>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT o.name FROM org_members m JOIN users o ON o.id = m.org_id WHERE m.user_id = ?1 ORDER BY o.name",
+        )?;
+        st.query_map([user_id], |r| r.get(0))?.collect()
+    }
+
+    pub fn repo_count(&self, owner: &str) -> Result<i64> {
+        self.c().query_row("SELECT COUNT(*) FROM repos WHERE owner = ?1", [owner], |r| r.get(0))
     }
 }

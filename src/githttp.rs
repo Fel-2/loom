@@ -91,13 +91,13 @@ async fn authorize(
     owner: &str,
     name: &str,
     svc: Service,
-) -> Result<std::path::PathBuf, Response> {
+) -> Result<(crate::db::Repo, Option<User>), Response> {
     let user = basic_user(app, headers).await;
     if headers.contains_key(header::AUTHORIZATION) && user.is_none() {
         return Err(challenge());
     }
     match app.authorize(user.as_ref(), owner, name, svc.need()) {
-        Some((repo, _)) => Ok(app.repo_dir(&repo)),
+        Some((repo, _)) => Ok((repo, user)),
         None if user.is_none() => Err(challenge()),
         None => Err(not_found()),
     }
@@ -138,7 +138,7 @@ pub async fn info_refs(
         return (StatusCode::FORBIDDEN, "smart HTTP only\n").into_response();
     };
     let dir = match authorize(&app, &headers, &owner, &name, svc).await {
-        Ok(d) => d,
+        Ok((repo, _)) => app.repo_dir(&repo),
         Err(r) => return r,
     };
     let proto = git_protocol(&headers);
@@ -184,13 +184,17 @@ pub async fn receive_pack(
 }
 
 async fn rpc(app: Arc<App>, owner: String, name: String, svc: Service, headers: HeaderMap, body: Body) -> Response {
-    let dir = match authorize(&app, &headers, &owner, &name, svc).await {
-        Ok(d) => d,
+    let (repo, user) = match authorize(&app, &headers, &owner, &name, svc).await {
+        Ok(r) => r,
         Err(r) => return r,
     };
+    let dir = app.repo_dir(&repo);
     let gzip = headers.get(header::CONTENT_ENCODING).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"gzip"));
 
     let mut cmd = Command::new("git");
+    if svc == Service::Receive {
+        app.receive_pack_setup(&mut cmd, &repo, user.as_ref());
+    }
     cmd.args([svc.name(), "--stateless-rpc"]).arg(&dir);
     if let Some(p) = git_protocol(&headers) {
         cmd.env("GIT_PROTOCOL", p);

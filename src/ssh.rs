@@ -184,6 +184,9 @@ impl server::Handler for Conn {
         };
         let dir = self.app.repo_dir(&repo);
         let mut cmd = Command::new("git");
+        if svc == "receive-pack" {
+            self.app.receive_pack_setup(&mut cmd, &repo, self.user.as_ref());
+        }
         cmd.arg(svc).arg(&dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(p) = &self.git_protocol {
             cmd.env("GIT_PROTOCOL", p);

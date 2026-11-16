@@ -78,6 +78,49 @@ pub fn init_bare(dir: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Local bare clone for forks; objects are hardlinked, refs copied.
+pub fn clone_bare(src: &Path, dst: &Path) -> std::result::Result<(), String> {
+    let parent = dst.parent().ok_or("bad repo path")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("git")
+        .args(["clone", "--quiet", "--bare", "--local"])
+        .arg(src)
+        .arg(dst)
+        .output()
+        .map_err(|e| format!("spawn git: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    // A fork must not keep pointing back at the parent as `origin`.
+    let _ = std::process::Command::new("git").arg("--git-dir").arg(dst).args(["remote", "remove", "origin"]).status();
+    Ok(())
+}
+
+/// Point HEAD at an existing local branch.
+pub fn set_default_branch(dir: &Path, branch: &str) -> std::result::Result<(), String> {
+    let repo = open(dir).map_err(|_| "cannot open repository".to_string())?;
+    let full = format!("refs/heads/{branch}");
+    if repo.try_find_reference(full.as_str()).ok().flatten().is_none() {
+        return Err(format!("no branch named '{branch}'"));
+    }
+    let st = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(dir)
+        .args(["symbolic-ref", "HEAD", &full])
+        .status()
+        .map_err(|e| e.to_string())?;
+    if st.success() { Ok(()) } else { Err("git symbolic-ref failed".into()) }
+}
+
+pub fn branch_names(dir: &Path) -> Vec<String> {
+    let Ok(repo) = open(dir) else { return Vec::new() };
+    let Ok(platform) = repo.references() else { return Vec::new() };
+    let Ok(iter) = platform.local_branches() else { return Vec::new() };
+    let mut v: Vec<String> = iter.filter_map(|r| r.ok()).map(|r| r.name().shorten().to_string()).collect();
+    v.sort();
+    v
+}
+
 /// After a push: if HEAD points at a branch that doesn't exist (e.g. first push
 /// was `master` into a `main` repo), repoint it at an existing branch.
 pub fn fix_head(dir: &Path) {

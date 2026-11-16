@@ -15,6 +15,8 @@ usage: loom [serve]
        loom repo create <owner>/<name> [--private] [--desc <text>]
        loom repo adopt        register bare repos already on disk (public)
        loom repo list
+       loom org create <name> <admin-user>
+       loom org add <org> <user> [read|write|admin]
 
 env: LOOM_DATA (./data)  LOOM_ADDR (127.0.0.1:3000)  LOOM_URL
      LOOM_SSH_ADDR (127.0.0.1:2222, 'off' disables)  LOOM_SSH_HOST";
@@ -55,6 +57,12 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
     if a.is_empty() || a[0] == "serve" {
         return None;
     }
+    if a[0] == "hook" {
+        return Some(match a.get(1).copied() {
+            Some("pre-receive") => hook_pre_receive(),
+            _ => Err("unknown hook".into()),
+        });
+    }
     if matches!(a[0], "-h" | "--help" | "help") {
         println!("{USAGE}");
         return Some(Ok(()));
@@ -73,8 +81,46 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
         ("repo", Some("create")) => repo_create(&app, rest),
         ("repo", Some("adopt")) => repo_adopt(&app),
         ("repo", Some("list")) => repo_list(&app),
+        ("org", Some("create")) => org_create(&app, rest),
+        ("org", Some("add")) => org_add(&app, rest),
         _ => Err(USAGE.into()),
     })
+}
+
+/// Runs inside `git receive-pack` (cwd = repo, objects quarantined). Enforces
+/// branch protection. Exit status non-zero rejects the whole push.
+fn hook_pre_receive() -> Result<(), String> {
+    use std::io::BufRead;
+    let data = std::env::var_os("LOOM_DATA").ok_or("LOOM_DATA not set")?;
+    let repo_id: i64 = std::env::var("LOOM_REPO_ID").ok().and_then(|v| v.parse().ok()).ok_or("LOOM_REPO_ID not set")?;
+    let db = db::Db::open(&std::path::Path::new(&data).join("loom.db")).map_err(|e| e.to_string())?;
+    let rules = db.protections(repo_id).map_err(|e| e.to_string())?;
+    let zero = |s: &str| s.bytes().all(|b| b == b'0');
+    let mut errors = Vec::new();
+    for line in std::io::stdin().lock().lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let mut it = line.split_whitespace();
+        let (Some(old), Some(new), Some(refname)) = (it.next(), it.next(), it.next()) else { continue };
+        let Some(branch) = refname.strip_prefix("refs/heads/") else { continue };
+        let Some(rule) = rules.iter().find(|r| r.branch == branch) else { continue };
+        if zero(new) {
+            if !rule.allow_delete {
+                errors.push(format!("branch '{branch}' is protected: deletion not allowed"));
+            }
+        } else if !zero(old) && !rule.allow_force_push {
+            let ff = std::process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", old, new])
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !ff.success() {
+                errors.push(format!("branch '{branch}' is protected: force-push not allowed"));
+            }
+        }
+    }
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(errors.iter().map(|e| format!("loom: {e}")).collect::<Vec<_>>().join("\n"))
 }
 
 fn user_add(app: &App, args: &[String]) -> Result<(), String> {
@@ -191,5 +237,35 @@ fn repo_list(app: &App) -> Result<(), String> {
     for r in app.db.visible_repos(Some(&admin), None).map_err(|e| e.to_string())? {
         println!("{}/{}{}", r.owner, r.name, if r.private { "  private" } else { "" });
     }
+    Ok(())
+}
+
+pub fn parse_role(s: &str) -> Option<db::Access> {
+    match s {
+        "read" => Some(db::Access::Read),
+        "write" => Some(db::Access::Write),
+        "admin" => Some(db::Access::Admin),
+        _ => None,
+    }
+}
+
+fn org_create(app: &App, args: &[String]) -> Result<(), String> {
+    let (name, admin) = (args.first().ok_or(USAGE)?, args.get(1).ok_or(USAGE)?);
+    if !db::valid_name(name) {
+        return Err("invalid org name".into());
+    }
+    let u = app.db.user_by_name(admin).map_err(|e| e.to_string())?.ok_or("no such user")?;
+    app.db.create_org(name, "", u.id).map_err(|e| e.to_string())?;
+    println!("created org {name} (admin: {})", u.name);
+    Ok(())
+}
+
+fn org_add(app: &App, args: &[String]) -> Result<(), String> {
+    let (org, user) = (args.first().ok_or(USAGE)?, args.get(1).ok_or(USAGE)?);
+    let role = parse_role(args.get(2).map_or("write", String::as_str)).ok_or("role must be read, write or admin")?;
+    let o = app.db.owner(org).map_err(|e| e.to_string())?.filter(|o| o.is_org).ok_or("no such org")?;
+    let u = app.db.user_by_name(user).map_err(|e| e.to_string())?.ok_or("no such user")?;
+    app.db.set_member(o.id, u.id, role).map_err(|e| e.to_string())?;
+    println!("{} is now {:?} in {}", u.name, role, o.name);
     Ok(())
 }

@@ -138,3 +138,27 @@ textarea, input[readonly] { font-family: var(--mono); font-size: .8rem; }
 ul.rows { list-style: none; margin: 0; padding: 0; }
 ul.rows li { display: flex; gap: .75rem; align-items: center; padding: .7rem 1rem; border-bottom: 1px solid var(--line); }
 ul.rows li:last-child { border-bottom: 0; }
+
+.repo-top { display: flex; gap: 1rem; align-items: flex-start; justify-content: space-between; }
+.actions { display: flex; gap: .4rem; align-items: center; flex-shrink: 0; }
+.btn.pill { border-radius: 999px; font-family: var(--mono); font-size: .8rem; padding: .2rem .7rem; }
+.btn.static { cursor: default; color: var(--muted); }
+.btn.static:hover { background: var(--card); }
+.count { margin-left: .4rem; padding-left: .45rem; border-left: 1px solid var(--line); color: var(--muted); }
+.btn.danger { border-color: var(--del-fg); color: var(--del-fg) !important; }
+.badge.warn { color: #b45309; border-color: #b45309; }
+.small { font-size: .85rem; }
+details.clone { position: relative; right: auto; top: auto; }
+details.clone summary.btn.pill { padding: .2rem .7rem; font-size: .8rem; }
+details.clone .card { top: 2.1rem; }
+h3 { margin: 0 0 .25rem; font-size: 1rem; }
+select { font: inherit; font-size: .9rem; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: .35rem; background: var(--bg); color: var(--fg); }
+.row-form { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; padding: .75rem 1rem; border-top: 1px solid var(--line); margin: 0; }
+.row-form input:not([type=checkbox]) { width: auto; flex: 1; min-width: 10rem; }
+.row-form label.check { display: flex; gap: .35rem; align-items: center; font-size: .85rem; color: var(--muted); }
+.row-form label.check input { width: auto; }
+.danger-zone { border-color: var(--del-fg); padding-bottom: 0; }
+.danger-zone .row-form { padding-left: 0; padding-right: 0; }
+.prefixed select { width: auto; }
+.owner-head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; margin-bottom: .5rem; }
+.owner-head .page-title { margin-bottom: .25rem; }

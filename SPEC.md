@@ -18,6 +18,11 @@ Tangled, whose code is MIT; no Tangled brand assets are used).
   ~52 MB peak at 32 concurrent browse requests, ~17 MB after load, 1 thread at
   idle. 16 concurrent clones (8 SSH + 8 HTTP) add nothing to loom's own RSS
   (pack work happens in short-lived `git` children).
+- loom M3 measured (+ orgs, forks, stars, collaborators, branch protection
+  via pre-receive hook): 8.8 MB idle, ~54 MB peak at 32 concurrent, 12.1 MB
+  after load once the periodic `malloc_trim` runs (1.7 MB of it heap; the rest
+  is the mapped binary and pack files). Without trim it held at 27 MB (not a
+  leak: flat across repeated load rounds).
 - No federation.
 - Git reads in-process via gitoxide (`gix`). Spawn `git` only for
   `upload-pack` / `receive-pack` (clone/fetch/push) and merges.
@@ -92,9 +97,9 @@ Backup = copy `loom.db` (via `.backup`) + `repos/`.
 
 ## Milestones
 
-1. **Browse** — serve a directory of bare repos: tree/blob/log/commit/diff/refs + README. The new UI.
-2. **Accounts + transport** — users, sessions, SSH keys, embedded SSH, smart HTTP.
-3. **Repo management** — create/fork/settings/collaborators/orgs/visibility.
+1. ✅ **Browse** — serve a directory of bare repos: tree/blob/log/commit/diff/refs + README. The new UI.
+2. ✅ **Accounts + transport** (tests/smoke.sh) — users, sessions, SSH keys, embedded SSH, smart HTTP.
+3. **Repo management** — create/fork/settings/collaborators/orgs/visibility. ✅ (tests/m3.sh)
 4. **Issues**
 5. **Pull requests**
 6. **Webhooks, statuses, API, search, notifications**

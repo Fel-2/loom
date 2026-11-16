@@ -2,7 +2,7 @@
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
-use crate::db::{Repo, SshKey, Token, User};
+use crate::db::{Access, Collaborator, Member, Owner, Protection, Repo, SshKey, Token, User};
 use crate::git::{CommitInfo, Entry, FileDiff, Line, RefInfo};
 
 pub fn page(title: &str, viewer: Option<&User>, body: Markup) -> Markup {
@@ -78,6 +78,17 @@ pub enum Tab {
     Overview,
     Commits,
     Refs,
+    Settings,
+}
+
+/// Social/permission bits shown in the repo header.
+pub struct Meta {
+    pub stars: i64,
+    /// `None` when signed out.
+    pub starred: Option<bool>,
+    pub forks: i64,
+    pub parent: Option<String>,
+    pub can_admin: bool,
 }
 
 pub struct Clone<'a> {
@@ -85,27 +96,47 @@ pub struct Clone<'a> {
     pub ssh: Option<&'a str>,
 }
 
-pub fn repo_header(repo: &Repo, clone: &Clone<'_>, tab: Tab, rev: &str) -> Markup {
+pub fn repo_header(repo: &Repo, clone: &Clone<'_>, meta: &Meta, tab: Tab, rev: &str) -> Markup {
     let (owner, name) = (&repo.owner, &repo.name);
     let base = format!("/{owner}/{name}");
     html! {
         section.repo-head {
-            div.repo-title {
-                a href={ "/" (owner) } { (owner) } span.sep { "/" } a href=(base) { strong { (name) } }
-                @if repo.private { span.badge { "private" } }
-            }
-            @if !repo.description.is_empty() { p.muted { (repo.description) } }
-            details.clone {
-                summary { "clone" }
-                div.card {
-                    label { "https" } input readonly value=(clone.http);
-                    @if let Some(s) = clone.ssh { label { "ssh" } input readonly value=(s); }
+            div.repo-top {
+                div {
+                    div.repo-title {
+                        a href={ "/" (owner) } { (owner) } span.sep { "/" } a href=(base) { strong { (name) } }
+                        @if repo.private { span.badge { "private" } }
+                        @if repo.archived { span.badge.warn { "archived" } }
+                    }
+                    @if let Some(p) = &meta.parent { p.muted.small { "forked from " a href={ "/" (p) } { (p) } } }
+                    @if !repo.description.is_empty() { p.muted { (repo.description) } }
+                }
+                div.actions {
+                    @match meta.starred {
+                        Some(on) => form.inline method="post" action={ (base) "/star" } {
+                            button.btn.pill { @if on { "★ starred" } @else { "☆ star" } span.count { (meta.stars) } }
+                        },
+                        None => span.btn.pill.static { "☆ " span.count { (meta.stars) } },
+                    }
+                    @if meta.starred.is_some() {
+                        a.btn.pill href={ (base) "/fork" } { "⑂ fork" span.count { (meta.forks) } }
+                    } @else {
+                        span.btn.pill.static { "⑂ " span.count { (meta.forks) } }
+                    }
+                    details.clone {
+                        summary.btn.pill { "clone" }
+                        div.card {
+                            label { "https" } input readonly value=(clone.http);
+                            @if let Some(s) = clone.ssh { label { "ssh" } input readonly value=(s); }
+                        }
+                    }
                 }
             }
             nav.tabs {
                 a.active[tab == Tab::Overview] href=(base) { "overview" }
                 a.active[tab == Tab::Commits] href={ (base) "/log/" (rev) } { "commits" }
                 a.active[tab == Tab::Refs] href={ (base) "/refs" } { "branches & tags" }
+                @if meta.can_admin { a.active[tab == Tab::Settings] href={ (base) "/settings" } { "settings" } }
             }
         }
     }
@@ -437,16 +468,256 @@ pub fn password(msg: Option<&str>, err: Option<&str>) -> Markup {
     }
 }
 
-pub fn new_repo(owner: &str, err: Option<&str>) -> Markup {
+fn owner_select(owners: &[String], selected: &str) -> Markup {
+    html! {
+        @if owners.len() > 1 {
+            select name="owner" {
+                @for o in owners { option value=(o) selected[o == selected] { (o) } }
+            }
+        } @else {
+            span.muted { (selected) } input type="hidden" name="owner" value=(selected);
+        }
+    }
+}
+
+pub fn new_repo(owners: &[String], selected: &str, err: Option<&str>) -> Markup {
     html! {
         div.narrow {
             h1.page-title { "new repository" }
             (flash(err))
             form.card.form method="post" action="/new" {
-                label { "name" div.prefixed { span.muted { (owner) " /" } input name="name" required autofocus pattern="[A-Za-z0-9._-]+"; } }
+                label { "name" div.prefixed { (owner_select(owners, selected)) span.muted { "/" } input name="name" required autofocus pattern="[A-Za-z0-9._-]+"; } }
                 label { "description" input name="description"; }
                 label.check { input type="checkbox" name="private" value="1"; "private" }
                 button.btn.primary { "create" }
+            }
+            p.muted.small { "Or " a href="/new/org" { "create an organization" } "." }
+        }
+    }
+}
+
+pub fn new_org(err: Option<&str>) -> Markup {
+    html! {
+        div.narrow {
+            h1.page-title { "new organization" }
+            (flash(err))
+            form.card.form method="post" action="/new/org" {
+                label { "name" input name="name" required autofocus pattern="[A-Za-z0-9._-]+"; }
+                label { "description" input name="description"; }
+                button.btn.primary { "create organization" }
+            }
+        }
+    }
+}
+
+pub fn fork(repo: &Repo, owners: &[String], err: Option<&str>) -> Markup {
+    let base = format!("/{}/{}", repo.owner, repo.name);
+    html! {
+        div.narrow {
+            h1.page-title { "fork " (repo.owner) "/" (repo.name) }
+            (flash(err))
+            form.card.form method="post" action={ (base) "/fork" } {
+                label { "into" div.prefixed { (owner_select(owners, &owners[0])) span.muted { "/" } input name="name" value=(repo.name) required pattern="[A-Za-z0-9._-]+"; } }
+                @if repo.private { p.muted.small { "The fork will be private, like its parent." } }
+                button.btn.primary { "fork" }
+            }
+        }
+    }
+}
+
+fn role_select(name: &str, current: Access) -> Markup {
+    html! {
+        select name=(name) {
+            option value="read" selected[current == Access::Read] { "read" }
+            option value="write" selected[current == Access::Write] { "write" }
+            option value="admin" selected[current == Access::Admin] { "admin" }
+        }
+    }
+}
+
+fn role_name(a: Access) -> &'static str {
+    match a {
+        Access::Admin => "admin",
+        Access::Write => "write",
+        Access::Read => "read",
+        Access::None => "none",
+    }
+}
+
+pub struct SettingsData<'a> {
+    pub branches: &'a [String],
+    pub default_branch: Option<&'a str>,
+    pub collaborators: &'a [Collaborator],
+    pub protections: &'a [Protection],
+    pub owners: &'a [String],
+}
+
+pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: Option<&str>) -> Markup {
+    let base = format!("/{}/{}/settings", repo.owner, repo.name);
+    html! {
+        div.stack {
+            (flash(err))
+            @if let Some(m) = msg { div.card.notice { (m) } }
+
+            form.card.form method="post" action={ (base) "/general" } {
+                h3 { "general" }
+                label { "description" input name="description" value=(repo.description); }
+                @if !d.branches.is_empty() {
+                    label { "default branch"
+                        select name="default_branch" {
+                            @for b in d.branches { option value=(b) selected[Some(b.as_str()) == d.default_branch] { (b) } }
+                        }
+                    }
+                }
+                label.check { input type="checkbox" name="private" value="1" checked[repo.private]; "private" }
+                label.check { input type="checkbox" name="archived" value="1" checked[repo.archived]; "archived (read-only, pushes refused)" }
+                button.btn.primary { "save" }
+            }
+
+            section.card.flush {
+                div.card-head { "collaborators" span.muted { (d.collaborators.len()) } }
+                @if d.collaborators.is_empty() { p.pad.muted { "Only the owner and admins have access." } }
+                ul.rows {
+                    @for c in d.collaborators {
+                        li {
+                            a href={ "/" (c.name) } { strong { (c.name) } }
+                            span.badge { (role_name(c.access)) }
+                            span.grow {}
+                            form.inline method="post" action={ (base) "/collaborators/remove" } {
+                                input type="hidden" name="name" value=(c.name);
+                                button.link.danger { "remove" }
+                            }
+                        }
+                    }
+                }
+                form.row-form method="post" action={ (base) "/collaborators" } {
+                    input name="name" placeholder="user name" required;
+                    (role_select("role", Access::Write))
+                    button.btn { "add / update" }
+                }
+            }
+
+            section.card.flush {
+                div.card-head { "branch protection" span.muted { (d.protections.len()) } }
+                @if d.protections.is_empty() { p.pad.muted { "No protected branches." } }
+                ul.rows {
+                    @for p in d.protections {
+                        li {
+                            code { (p.branch) }
+                            span.muted.small {
+                                @if p.allow_force_push { "force-push allowed" } @else { "no force-push" }
+                                " · "
+                                @if p.allow_delete { "deletion allowed" } @else { "no deletion" }
+                            }
+                            span.grow {}
+                            form.inline method="post" action={ (base) "/protect/remove" } {
+                                input type="hidden" name="branch" value=(p.branch);
+                                button.link.danger { "unprotect" }
+                            }
+                        }
+                    }
+                }
+                form.row-form method="post" action={ (base) "/protect" } {
+                    input name="branch" placeholder="branch, e.g. main" required value=[d.default_branch];
+                    label.check { input type="checkbox" name="allow_force_push" value="1"; "allow force-push" }
+                    label.check { input type="checkbox" name="allow_delete" value="1"; "allow delete" }
+                    button.btn { "protect" }
+                }
+            }
+
+            section.card.danger-zone {
+                h3 { "danger zone" }
+                form.row-form method="post" action={ (base) "/rename" } {
+                    span { "rename" }
+                    input name="name" value=(repo.name) required pattern="[A-Za-z0-9._-]+";
+                    button.btn { "rename" }
+                }
+                form.row-form method="post" action={ (base) "/transfer" } {
+                    span { "transfer to" }
+                    select name="owner" { @for o in d.owners { option value=(o) selected[*o == repo.owner] { (o) } } }
+                    button.btn { "transfer" }
+                }
+                form.row-form method="post" action={ (base) "/delete" } {
+                    span { "delete — type " code { (repo.owner) "/" (repo.name) } " to confirm" }
+                    input name="confirm" required autocomplete="off";
+                    button.btn.danger { "delete repository" }
+                }
+            }
+        }
+    }
+}
+
+pub fn owner_page(owner: &Owner, repos: &[Repo], orgs: &[String], members: &[Member], can_admin: bool) -> Markup {
+    html! {
+        div.owner-head {
+            h1.page-title { (owner.name) @if owner.is_org { span.badge { "org" } } }
+            @if !owner.description.is_empty() { p.muted { (owner.description) } }
+            @if can_admin && owner.is_org { a.btn href={ "/" (owner.name) "/settings" } { "org settings" } }
+        }
+        div.split {
+            div { (index(repos, None)) }
+            aside.stack {
+                @if !orgs.is_empty() {
+                    div.card.flush {
+                        div.card-head { "organizations" }
+                        ul.rows { @for o in orgs { li { a href={ "/" (o) } { (o) } } } }
+                    }
+                }
+                @if owner.is_org {
+                    div.card.flush {
+                        div.card-head { "members" span.muted { (members.len()) } }
+                        ul.rows { @for m in members { li { a href={ "/" (m.name) } { (m.name) } span.grow {} span.badge { (role_name(m.access)) } } } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn org_settings(org: &Owner, members: &[Member], repo_count: i64, msg: Option<&str>, err: Option<&str>) -> Markup {
+    let base = format!("/{}/settings", org.name);
+    html! {
+        h1.page-title { a href={ "/" (org.name) } { (org.name) } " · settings" }
+        div.stack.narrow-left {
+            (flash(err))
+            @if let Some(m) = msg { div.card.notice { (m) } }
+            form.card.form method="post" action={ (base) "/general" } {
+                label { "description" input name="description" value=(org.description); }
+                button.btn.primary { "save" }
+            }
+            section.card.flush {
+                div.card-head { "members" span.muted { (members.len()) } }
+                ul.rows {
+                    @for m in members {
+                        li {
+                            a href={ "/" (m.name) } { strong { (m.name) } }
+                            span.badge { (role_name(m.access)) }
+                            span.grow {}
+                            form.inline method="post" action={ (base) "/members/remove" } {
+                                input type="hidden" name="name" value=(m.name);
+                                button.link.danger { "remove" }
+                            }
+                        }
+                    }
+                }
+                form.row-form method="post" action={ (base) "/members" } {
+                    input name="name" placeholder="user name" required;
+                    (role_select("role", Access::Write))
+                    button.btn { "add / update" }
+                }
+                p.pad.muted.small { "read: see private repos · write: push and create repos · admin: manage org and all its repos" }
+            }
+            section.card.danger-zone {
+                h3 { "danger zone" }
+                @if repo_count > 0 {
+                    p.muted { "Delete or transfer the org's " (repo_count) " repositories before deleting it." }
+                } @else {
+                    form.row-form method="post" action={ (base) "/delete" } {
+                        span { "delete — type " code { (org.name) } " to confirm" }
+                        input name="confirm" required autocomplete="off";
+                        button.btn.danger { "delete organization" }
+                    }
+                }
             }
         }
     }

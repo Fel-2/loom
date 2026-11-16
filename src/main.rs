@@ -17,6 +17,18 @@ fn limit_malloc_arenas() {
     unsafe { libc::mallopt(M_ARENA_MAX, 1) };
 }
 
+/// After a burst, glibc keeps freed heap pages. Hand them back once a minute
+/// (measured after browse load: 17.6 MB -> 12.1 MB, heap 1.7 MB). Costs microseconds.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+async fn trim_heap_periodically() {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        unsafe { libc::malloc_trim(0) };
+    }
+}
+
 fn main() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     limit_malloc_arenas();
@@ -37,6 +49,11 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    if let Err(e) = app.install_hooks() {
+        eprintln!("install hooks: {e}");
+        std::process::exit(1);
+    }
 
     // One async thread; git work goes to a small, bounded blocking pool.
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -66,6 +83,9 @@ fn main() {
                 }
             });
         }
+
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        tokio::spawn(trim_heap_periodically());
 
         let router = web::router(app);
         let shutdown = async {
