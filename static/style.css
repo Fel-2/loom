@@ -217,3 +217,36 @@ a.ref.sha { font-family: var(--mono); font-size: .85em; font-weight: 400; backgr
 .progress div { height: 100%; background: var(--add-fg); }
 li.milestone { align-items: flex-start; }
 input[type=color] { width: 2.5rem; height: 2rem; padding: .1rem; flex: 0 0 auto !important; min-width: 0 !important; }
+
+/* pull requests */
+.state.merged { color: #8250df; }
+.pill.merged { background: #f0e7ff; color: #8250df; }
+@media (prefers-color-scheme: dark) { .pill.merged { background: #2a1f3d; color: #c4a5ff; } .state.merged { color: #c4a5ff; } }
+nav.subtabs { margin-top: .75rem; }
+.merge-box { display: flex; flex-direction: column; gap: .6rem; border-left: 3px solid var(--line); }
+.mb-row { display: flex; gap: .75rem; align-items: flex-start; }
+.mb-row .big { font-size: 1.2rem; line-height: 1.3; width: 1.4rem; text-align: center; }
+.big.ok, .verdict.ok { color: var(--add-fg); } .big.bad, .verdict.bad { color: var(--del-fg); }
+.mb-row.merged .big { color: #8250df; }
+.verdict { font-weight: 600; font-size: .85rem; }
+.merge-form { display: flex; gap: .9rem; align-items: center; flex-wrap: wrap; }
+.merge-form label.check { display: flex; gap: .35rem; align-items: center; font-size: .9rem; }
+.merge-form label.check input { width: auto; }
+ul.conflicts { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
+.review-form summary { cursor: pointer; font-weight: 600; }
+.review-form[open] summary { margin-bottom: .6rem; }
+.review-form .row label.check { display: flex; gap: .3rem; align-items: center; font-size: .9rem; color: var(--fg); }
+.review-form .row label.check input { width: auto; }
+.review.review-approve { border-left: 3px solid var(--add-fg); }
+.review.review-changes { border-left: 3px solid var(--del-fg); }
+.compare-form { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.compare-form select { min-width: 10rem; }
+tr.thread td { background: var(--bg); padding: .5rem .75rem; white-space: normal; font-family: var(--sans); }
+.inline-comment { background: var(--card); border: 1px solid var(--line); border-radius: .4rem; padding: .5rem .75rem; margin-bottom: .5rem; }
+.inline-form { max-width: 48rem; }
+a.add-cmt { color: inherit; }
+a.add-cmt:hover { color: var(--accent); font-weight: 700; text-decoration: none; }
+pre.range-diff { padding: 1rem; font-size: .8rem; line-height: 1.45; }
+pre.range-diff .add { color: var(--add-fg); } pre.range-diff .del { color: var(--del-fg); } pre.range-diff .hdr { font-weight: 700; }
+code.sha { color: var(--muted); }
+.code-comment .card-head a.mono { font-weight: 400; }

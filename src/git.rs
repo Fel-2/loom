@@ -203,6 +203,10 @@ fn commit_info(c: &gix::Commit<'_>) -> Result<CommitInfo> {
     })
 }
 
+pub fn parse_id(hex: &str) -> Option<ObjectId> {
+    ObjectId::from_hex(hex.as_bytes()).ok()
+}
+
 pub fn commit(repo: &gix::Repository, id: ObjectId) -> Result<CommitInfo> {
     commit_info(&repo.find_commit(id)?)
 }
@@ -341,8 +345,14 @@ fn is_binary(data: &[u8]) -> bool {
 /// Diff a commit against its first parent (or the empty tree).
 pub fn commit_diff(repo: &gix::Repository, id: ObjectId) -> Result<Vec<FileDiff>> {
     let c = repo.find_commit(id)?;
-    let new_tree = c.tree()?;
-    let old_tree = match c.parent_ids().next() {
+    let parent = c.parent_ids().next().map(|p| p.detach());
+    diff_commits(repo, parent, id)
+}
+
+/// Tree diff between two commits (`old = None` = empty tree).
+pub fn diff_commits(repo: &gix::Repository, old: Option<ObjectId>, new: ObjectId) -> Result<Vec<FileDiff>> {
+    let new_tree = repo.find_commit(new)?.tree()?;
+    let old_tree = match old {
         Some(p) => Some(repo.find_commit(p)?.tree()?),
         None => None,
     };

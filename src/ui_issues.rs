@@ -23,12 +23,24 @@ pub fn label_chip(l: &Label, href: Option<&str>) -> Markup {
     }
 }
 
-fn state_icon(closed: bool) -> Markup {
-    html! { @if closed { span.state.closed title="closed" { "✓" } } @else { span.state.open title="open" { "●" } } }
+fn state_icon(i: &Issue) -> Markup {
+    html! {
+        @if i.merged { span.state.merged title="merged" { "⇄" } }
+        @else if i.closed { span.state.closed title="closed" { "✓" } }
+        @else { span.state.open title="open" { "●" } }
+    }
 }
 
 pub fn state_pill(closed: bool) -> Markup {
     html! { @if closed { span.pill.closed { "✓ closed" } } @else { span.pill.open { "● open" } } }
+}
+
+pub fn pr_state_pill(closed: bool, merged: bool) -> Markup {
+    html! {
+        @if merged { span.pill.merged { "⇄ merged" } }
+        @else if closed { span.pill.closed { "✕ closed" } }
+        @else { span.pill.open { "● open" } }
+    }
 }
 
 /// Query string for the list view, overriding one key.
@@ -44,6 +56,8 @@ pub fn list_query(f: &Filter, closed: Option<bool>, page: Option<usize>) -> Stri
 }
 
 pub struct ListData<'a> {
+    /// "issues" or "pulls"
+    pub kind: &'a str,
     pub base: &'a str,
     pub issues: &'a [Issue],
     pub filter: &'a Filter,
@@ -64,35 +78,40 @@ pub fn list(d: &ListData<'_>) -> Markup {
                 a.active[f.closed] href={ (list_query(f, Some(true), None)) } { "✓ " (d.closed) " closed" }
             }
             @for (k, v) in active {
-                @if let Some(v) = v { a.filter-chip href={ (d.base) "/issues?state=" @if f.closed { "closed" } @else { "open" } } title="clear filter" { (k) ": " (v) " ×" } }
+                @if let Some(v) = v { a.filter-chip href={ (d.base) "/" (d.kind) "?state=" @if f.closed { "closed" } @else { "open" } } title="clear filter" { (k) ": " (v) " ×" } }
             }
             span.grow {}
             a.btn href={ (d.base) "/labels" } { "labels" }
             a.btn href={ (d.base) "/milestones" } { "milestones" }
-            @if d.can_create { a.btn.primary href={ (d.base) "/issues/new" } { "new issue" } }
+            @if d.can_create {
+                @if d.kind == "pulls" { a.btn.primary href={ (d.base) "/compare" } { "new pull request" } }
+                @else { a.btn.primary href={ (d.base) "/issues/new" } { "new issue" } }
+            }
         }
         div.card.flush {
-            @if d.issues.is_empty() { p.pad.muted { "No " @if f.closed { "closed" } @else { "open" } " issues." } }
+            @if d.issues.is_empty() { p.pad.muted { "No " @if f.closed { "closed" } @else { "open" } " " @if d.kind == "pulls" { "pull requests" } @else { "issues" } "." } }
             ul.issues {
                 @for i in d.issues {
                     li {
-                        (state_icon(i.closed))
+                        (state_icon(i))
                         div.issue-main {
                             div {
-                                a.issue-title href={ (d.base) "/issues/" (i.number) } { (i.title) }
-                                @for l in &i.labels { " " (label_chip(l, Some(&format!("{}/issues?label={}", d.base, crate::web::urlencode(&l.name))))) }
+                                a.issue-title href={ (d.base) "/" (d.kind) "/" (i.number) } { (i.title) }
+                                @for l in &i.labels { " " (label_chip(l, Some(&format!("{}/{}?label={}", d.base, d.kind, crate::web::urlencode(&l.name))))) }
                             }
                             div.meta {
                                 span.muted { "#" (i.number) }
                                 span.muted {
-                                    @if i.closed { "closed " (ago(i.closed_at.unwrap_or(i.updated))) } @else { "opened " (ago(i.created)) }
+                                    @if i.merged { "merged " (ago(i.closed_at.unwrap_or(i.updated))) }
+                                    @else if i.closed { "closed " (ago(i.closed_at.unwrap_or(i.updated))) }
+                                    @else { "opened " (ago(i.created)) }
                                     " by "
-                                    @match &i.author { Some(a) => a href={ (d.base) "/issues?author=" (a) } { (a) }, None => "ghost" }
+                                    @match &i.author { Some(a) => a href={ (d.base) "/" (d.kind) "?author=" (a) } { (a) }, None => "ghost" }
                                 }
-                                @if let Some(m) = &i.milestone { a.muted href={ (d.base) "/issues?milestone=" (crate::web::urlencode(m)) } { "◇ " (m) } }
+                                @if let Some(m) = &i.milestone { a.muted href={ (d.base) "/" (d.kind) "?milestone=" (crate::web::urlencode(m)) } { "◇ " (m) } }
                             }
                         }
-                        @if i.comments > 0 { a.comments href={ (d.base) "/issues/" (i.number) } { "💬 " (i.comments) } }
+                        @if i.comments > 0 { a.comments href={ (d.base) "/" (d.kind) "/" (i.number) } { "💬 " (i.comments) } }
                     }
                 }
             }
@@ -121,16 +140,19 @@ pub fn new_issue(base: &str, title: &str, body: &str, err: Option<&str>) -> Mark
 pub enum Item {
     Comment { c: Comment, html: Markup, can_edit: bool, can_delete: bool },
     Event { actor: Option<String>, created: i64, text: Markup },
+    Review { author: Option<String>, state: String, html: Markup, created: i64 },
+    Code { author: Option<String>, path: String, line: i64, html: Markup, created: i64, outdated: bool, link: String },
 }
 
 pub struct ShowData<'a> {
+    pub kind: &'a str,
     pub base: &'a str,
     pub issue: &'a Issue,
     pub body_html: Markup,
     pub items: Vec<Item>,
-    pub assignees: &'a [String],
-    pub labels: &'a [Label],
-    pub milestones: &'a [Milestone],
+    pub assignees: Vec<String>,
+    pub labels: Vec<Label>,
+    pub milestones: Vec<Milestone>,
     pub signed_in: bool,
     pub can_comment: bool,
     pub can_edit: bool,
@@ -139,6 +161,12 @@ pub struct ShowData<'a> {
     pub archived: bool,
     pub msg: Option<&'a str>,
     pub err: Option<&'a str>,
+    /// PR pages: replaces the issue title block (title, state, sub-tabs).
+    pub head: Option<Markup>,
+    /// PR pages: merge box above the comment form.
+    pub merge_box: Option<Markup>,
+    /// PR pages: reviewers etc. at the top of the sidebar.
+    pub extra_side: Option<Markup>,
 }
 
 fn who(_base: &str, name: &Option<String>) -> Markup {
@@ -147,13 +175,15 @@ fn who(_base: &str, name: &Option<String>) -> Markup {
 
 pub fn show(d: &ShowData<'_>) -> Markup {
     let i = d.issue;
-    let ibase = format!("{}/issues/{}", d.base, i.number);
+    let ibase = format!("{}/{}/{}", d.base, d.kind, i.number);
     html! {
-        div.issue-head {
-            h2 { (i.title) " " span.muted { "#" (i.number) } }
-            div.meta {
-                (state_pill(i.closed))
-                span.muted { (who(d.base, &i.author)) " opened this " (ago(i.created)) " · " (i.comments) " comments" }
+        @if let Some(h) = &d.head { (h) } @else {
+            div.issue-head {
+                h2 { (i.title) " " span.muted { "#" (i.number) } }
+                div.meta {
+                    (state_pill(i.closed))
+                    span.muted { (who(d.base, &i.author)) " opened this " (ago(i.created)) " · " (i.comments) " comments" }
+                }
             }
         }
         (flash_box(d.err, d.msg))
@@ -205,8 +235,35 @@ pub fn show(d: &ShowData<'_>) -> Markup {
                         Item::Event { actor, created, text } => {
                             div.event { span.dot {} (who(d.base, actor)) " " (text) " " span.muted { (ago(*created)) } }
                         }
+                        Item::Review { author, state, html, created } => {
+                            article class={ "card flush comment review review-" (state) } {
+                                div.card-head {
+                                    (who(d.base, author))
+                                    @match state.as_str() {
+                                        "approve" => span.verdict.ok { "✓ approved" },
+                                        "changes" => span.verdict.bad { "✕ requested changes" },
+                                        _ => span.verdict { "reviewed" },
+                                    }
+                                    span.muted { (ago(*created)) }
+                                }
+                                @if !html.0.is_empty() { div.prose.pad { (html) } }
+                            }
+                        }
+                        Item::Code { author, path, line, html, created, outdated, link } => {
+                            article.card.flush.comment.code-comment {
+                                div.card-head {
+                                    (who(d.base, author))
+                                    span.muted { "on " }
+                                    a.mono href=(link) { (path) ":" (line) }
+                                    @if *outdated { span.badge { "outdated" } }
+                                    span.muted { (ago(*created)) }
+                                }
+                                div.prose.pad { (html) }
+                            }
+                        }
                     }
                 }
+                @if let Some(m) = &d.merge_box { (m) }
                 @if d.can_comment {
                     form.card.form method="post" action={ (ibase) "/comments" } {
                         textarea.body name="body" rows="6" placeholder="Leave a comment (markdown)" {}
@@ -216,7 +273,7 @@ pub fn show(d: &ShowData<'_>) -> Markup {
                                 @if i.closed {
                                     button.btn name="action" value="reopen" { "reopen" }
                                 } @else {
-                                    button.btn name="action" value="close" { "close issue" }
+                                    button.btn name="action" value="close" { @if d.kind == "pulls" { "close pull request" } @else { "close issue" } }
                                 }
                             }
                         }
@@ -228,10 +285,11 @@ pub fn show(d: &ShowData<'_>) -> Markup {
                 }
             }
             aside.stack.sidebar {
+                @if let Some(x) = &d.extra_side { (x) }
                 section.card {
                     h4 { "assignees" }
                     @if d.assignees.is_empty() { p.muted.small { "nobody" } }
-                    @for a in d.assignees {
+                    @for a in &d.assignees {
                         div.side-row {
                             a href={ "/" (a) } { (a) }
                             @if d.can_triage {
@@ -253,7 +311,7 @@ pub fn show(d: &ShowData<'_>) -> Markup {
                     h4 { "labels" }
                     @if d.can_triage {
                         form.label-pick method="post" action={ (ibase) "/labels" } {
-                            @for l in d.labels {
+                            @for l in &d.labels {
                                 label.check {
                                     input type="checkbox" name="label" value=(l.id) checked[i.labels.iter().any(|x| x.id == l.id)];
                                     (label_chip(l, None))

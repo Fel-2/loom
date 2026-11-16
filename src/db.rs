@@ -169,6 +169,57 @@ INSERT INTO labels (repo_id, name, color, description)
     ) d;
 ";
 
+/// v4: pull requests (an issue row with is_pr = 1 plus this), revisions per
+/// push, reviews, inline review comments, "require PR" protection.
+const SCHEMA_V4: &str = "
+CREATE TABLE pulls (
+    issue_id INTEGER PRIMARY KEY REFERENCES issues(id) ON DELETE CASCADE,
+    head_repo_id INTEGER REFERENCES repos(id) ON DELETE SET NULL,
+    head_branch TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    head_sha TEXT NOT NULL,
+    merged INTEGER NOT NULL DEFAULT 0,
+    merged_at INTEGER,
+    merged_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    merge_sha TEXT
+);
+CREATE INDEX pulls_head ON pulls(head_repo_id, head_branch);
+CREATE TABLE pull_revisions (
+    id INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    n INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    forced INTEGER NOT NULL DEFAULT 0,
+    pusher_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created INTEGER NOT NULL,
+    UNIQUE (issue_id, n)
+);
+CREATE TABLE reviews (
+    id INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    state TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    head_sha TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
+CREATE INDEX reviews_issue ON reviews(issue_id);
+CREATE TABLE review_comments (
+    id INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    path TEXT NOT NULL,
+    side TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created INTEGER NOT NULL
+);
+CREATE INDEX review_comments_issue ON review_comments(issue_id);
+ALTER TABLE protected_branches ADD COLUMN require_pr INTEGER NOT NULL DEFAULT 0;
+";
+
 pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
     ("bug", "#d73a4a", "Something is broken"),
     ("enhancement", "#84b6eb", "New feature or request"),
@@ -247,6 +298,7 @@ pub struct Protection {
     pub branch: String,
     pub allow_force_push: bool,
     pub allow_delete: bool,
+    pub require_pr: bool,
 }
 
 /// A user or an org (they share one namespace).
@@ -353,6 +405,9 @@ impl Db {
         }
         if v < 3 {
             c.execute_batch(&format!("BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"))?;
+        }
+        if v < 4 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
         }
         Ok(Db(Mutex::new(c)))
     }
@@ -699,20 +754,21 @@ impl Db {
     pub fn protections(&self, repo_id: i64) -> Result<Vec<Protection>> {
         let c = self.c();
         let mut st = c.prepare(
-            "SELECT branch, allow_force_push, allow_delete FROM protected_branches WHERE repo_id = ?1 ORDER BY branch",
+            "SELECT branch, allow_force_push, allow_delete, require_pr FROM protected_branches WHERE repo_id = ?1 ORDER BY branch",
         )?;
         st.query_map([repo_id], |r| {
-            Ok(Protection { branch: r.get(0)?, allow_force_push: r.get(1)?, allow_delete: r.get(2)? })
+            Ok(Protection { branch: r.get(0)?, allow_force_push: r.get(1)?, allow_delete: r.get(2)?, require_pr: r.get(3)? })
         })?
         .collect()
     }
 
     pub fn set_protection(&self, repo_id: i64, p: &Protection) -> Result<()> {
         self.c().execute(
-            "INSERT INTO protected_branches (repo_id, branch, allow_force_push, allow_delete) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO protected_branches (repo_id, branch, allow_force_push, allow_delete, require_pr) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (repo_id, branch) DO UPDATE SET allow_force_push = excluded.allow_force_push,
-                                                         allow_delete = excluded.allow_delete",
-            params![repo_id, p.branch, p.allow_force_push, p.allow_delete],
+                                                         allow_delete = excluded.allow_delete,
+                                                         require_pr = excluded.require_pr",
+            params![repo_id, p.branch, p.allow_force_push, p.allow_delete, p.require_pr],
         )?;
         Ok(())
     }

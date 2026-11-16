@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use maud::html;
@@ -92,7 +92,7 @@ pub fn record_mentions(app: &App, author: &User, src: &Repo, src_issue: &Issue, 
 }
 
 /// Timeline text for an event. Cross-repo sources stay hidden unless visible.
-fn event_text(app: &App, viewer: Option<&User>, repo: &Repo, e: &issues_db::Event) -> Option<maud::Markup> {
+fn event_text(app: &App, viewer: Option<&User>, repo: &Repo, number: i64, e: &issues_db::Event) -> Option<maud::Markup> {
     let base = format!("/{}/{}", repo.owner, repo.name);
     let (a, b) = e.data.split_once('\t').unwrap_or((&e.data, ""));
     Some(match e.kind.as_str() {
@@ -110,6 +110,22 @@ fn event_text(app: &App, viewer: Option<&User>, repo: &Repo, e: &issues_db::Even
             let verb = if e.kind == "commit_closed" { "closed this in" } else { "referenced this in" };
             html! { (verb) " commit " a.sha href={ (base) "/commit/" (a) } { (short) } " " span.muted { (b) } }
         }
+        "pushed" => {
+            let mut it = e.data.split('\t');
+            let (n, sha, forced, count) = (it.next()?, it.next()?, it.next().unwrap_or(""), it.next().unwrap_or("0"));
+            html! {
+                @if forced == "force" { "force-pushed " } @else { "pushed " (count) " commit" @if count != "1" { "s" } " " }
+                a href={ (base) "/pulls/" (number) "/revisions" } { "v" (n) }
+                " " a.sha href={ (base) "/commit/" (sha) } { (&sha[..sha.len().min(8)]) }
+            }
+        }
+        "merged" => {
+            let mut it = e.data.split('\t');
+            let (sha, branch) = (it.next()?, it.next().unwrap_or(""));
+            html! { "merged commit " a.sha href={ (base) "/commit/" (sha) } { (&sha[..sha.len().min(8)]) } " into " code { (branch) } }
+        }
+        "head_deleted" => html! { "deleted the head branch " code { (a) } },
+        "pr_closed" => html! { "closed this via " a href={ (base) "/pulls/" (a) } { "#" (a) } },
         "referenced" => {
             let (src_id, num): (i64, i64) = (a.parse().ok()?, b.parse().ok()?);
             let src = app.db.repo_by_id(src_id).ok()??;
@@ -131,8 +147,17 @@ fn can_triage(ctx: &Ctx) -> bool {
     ctx.access >= Access::Write
 }
 
+/// Issue or PR by number (they share numbering and these handlers).
 fn load_issue(app: &App, ctx: &Ctx, number: i64) -> Result<Issue, Err> {
-    app.db.issue(ctx.repo.id, number)?.filter(|i| !i.is_pr).ok_or(Err::NotFound)
+    app.db.issue(ctx.repo.id, number)?.ok_or(Err::NotFound)
+}
+
+pub fn kind_of(i: &Issue) -> &'static str {
+    if i.is_pr { "pulls" } else { "issues" }
+}
+
+fn back(ctx: &Ctx, i: &Issue) -> Response {
+    see_other(&format!("{}/{}/{}", ctx.base(), kind_of(i), i.number))
 }
 
 /// Parse an urlencoded body allowing repeated keys.
@@ -199,7 +224,15 @@ struct ListQ {
 }
 
 async fn list(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(String, String)>, Query(q): Query<ListQ>) -> Res {
-    let ctx = Ctx::load(&app, v, &owner, &name)?;
+    list_impl(&app, v, &owner, &name, q, false)
+}
+
+async fn list_pulls(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(String, String)>, Query(q): Query<ListQ>) -> Res {
+    list_impl(&app, v, &owner, &name, q, true)
+}
+
+fn list_impl(app: &Arc<App>, v: Option<User>, owner: &str, name: &str, q: ListQ, is_pr: bool) -> Res {
+    let ctx = Ctx::load(app, v, owner, name)?;
     let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
     let f = Filter {
         closed: q.state.as_deref() == Some("closed"),
@@ -209,12 +242,14 @@ async fn list(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(Stri
         author: nonempty(q.author),
     };
     let page = q.page.unwrap_or(0).min(10_000);
-    let mut issues = app.db.list_issues(ctx.repo.id, false, &f, PER_PAGE + 1, page * PER_PAGE)?;
+    let mut issues = app.db.list_issues(ctx.repo.id, is_pr, &f, PER_PAGE + 1, page * PER_PAGE)?;
     let more = issues.len() > PER_PAGE;
     issues.truncate(PER_PAGE);
-    let (open, closed) = app.db.issue_counts(ctx.repo.id, false, &f)?;
+    let (open, closed) = app.db.issue_counts(ctx.repo.id, is_pr, &f)?;
     let base = ctx.base();
+    let kind = if is_pr { "pulls" } else { "issues" };
     let d = uii::ListData {
+        kind,
         base: &base,
         issues: &issues,
         filter: &f,
@@ -224,8 +259,9 @@ async fn list(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(Stri
         more,
         can_create: ctx.viewer.is_some() && !ctx.repo.archived,
     };
-    let body = html! { (ctx.header(ui::Tab::Issues, "HEAD")) (uii::list(&d)) };
-    Ok(ctx.page("issues", body))
+    let tab = if is_pr { ui::Tab::Pulls } else { ui::Tab::Issues };
+    let body = html! { (ctx.header(tab, "HEAD")) (uii::list(&d)) };
+    Ok(ctx.page(kind, body))
 }
 
 async fn new_page(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>) -> Res {
@@ -259,15 +295,33 @@ async fn create(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(St
     Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
 }
 
-// ---------- view ----------
+// ---------- view (issues; PRs render in pulls_web) ----------
 
-fn render_issue(app: &Arc<App>, ctx: &Ctx, number: i64, msg: Option<&str>, err: Option<&str>) -> Res {
+pub fn render_issue(app: &Arc<App>, ctx: &Ctx, number: i64, msg: Option<&str>, err: Option<&str>) -> Res {
     let issue = load_issue(app, ctx, number)?;
+    if issue.is_pr {
+        return crate::pulls_web::render_pull(app, ctx, issue, msg, err);
+    }
+    let parts = issue_parts(app, ctx, &issue)?;
+    let base = ctx.base();
+    let d = show_data(ctx, &base, &issue, parts, msg, err);
+    let body = html! { (ctx.header(ui::Tab::Issues, "HEAD")) (uii::show(&d)) };
+    let status = if err.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
+    Ok((status, ctx.page(&format!("{} #{}", issue.title, issue.number), body)).into_response())
+}
+
+/// Everything the conversation view needs, shared by issues and PRs.
+pub struct Parts {
+    pub items: Vec<(i64, Item)>,
+    pub body_html: maud::Markup,
+    pub assignees: Vec<String>,
+    pub labels: Vec<issues_db::Label>,
+    pub milestones: Vec<issues_db::Milestone>,
+}
+
+pub fn issue_parts(app: &Arc<App>, ctx: &Ctx, issue: &Issue) -> Result<Parts, Err> {
     let viewer = ctx.viewer.as_ref();
     let refs = Refs { app, viewer, repo: &ctx.repo, git: crate::git::open(&ctx.dir).ok() };
-    let is_author = viewer.is_some_and(|u| Some(u.id) == issue.author_id);
-    let triage = can_triage(ctx);
-
     let mut items: Vec<(i64, Item)> = Vec::new();
     for c in app.db.comments(issue.id)? {
         let mine = viewer.is_some_and(|u| Some(u.id) == c.author_id);
@@ -276,37 +330,47 @@ fn render_issue(app: &Arc<App>, ctx: &Ctx, number: i64, msg: Option<&str>, err: 
         items.push((c.created, Item::Comment { can_edit: mine && !ctx.repo.archived, can_delete, html, c }));
     }
     for e in app.db.events(issue.id)? {
-        if let Some(text) = event_text(app, viewer, &ctx.repo, &e) {
+        if let Some(text) = event_text(app, viewer, &ctx.repo, issue.number, &e) {
             items.push((e.created, Item::Event { actor: e.actor.clone(), created: e.created, text }));
         }
     }
-    // Stable: same-second items keep insertion order (comments, then events).
-    items.sort_by_key(|(t, _)| *t);
-
-    let assignees = app.db.assignees(issue.id)?;
-    let labels = app.db.labels(ctx.repo.id)?;
-    let milestones = app.db.milestones(ctx.repo.id)?;
-    let base = ctx.base();
-    let d = uii::ShowData {
-        base: &base,
-        issue: &issue,
+    Ok(Parts {
+        items,
         body_html: ui::markdown_refs(&issue.body, &refs),
-        items: items.into_iter().map(|(_, i)| i).collect(),
-        assignees: &assignees,
-        labels: &labels,
-        milestones: &milestones,
+        assignees: app.db.assignees(issue.id)?,
+        labels: app.db.labels(ctx.repo.id)?,
+        milestones: app.db.milestones(ctx.repo.id)?,
+    })
+}
+
+pub fn show_data<'a>(ctx: &Ctx, base: &'a str, issue: &'a Issue, mut parts: Parts, msg: Option<&'a str>, err: Option<&'a str>) -> uii::ShowData<'a> {
+    let viewer = ctx.viewer.as_ref();
+    let is_author = viewer.is_some_and(|u| Some(u.id) == issue.author_id);
+    let triage = can_triage(ctx);
+    // Stable: same-second items keep insertion order.
+    parts.items.sort_by_key(|(t, _)| *t);
+    let locked = ctx.repo.archived || issue.merged;
+    uii::ShowData {
+        kind: kind_of(issue),
+        base,
+        issue,
+        body_html: parts.body_html,
+        items: parts.items.into_iter().map(|(_, i)| i).collect(),
+        assignees: parts.assignees,
+        labels: parts.labels,
+        milestones: parts.milestones,
         signed_in: viewer.is_some(),
         can_comment: viewer.is_some() && !ctx.repo.archived,
         can_edit: (is_author || triage) && !ctx.repo.archived,
         can_triage: triage && !ctx.repo.archived,
-        can_close: (is_author || triage) && !ctx.repo.archived,
+        can_close: (is_author || triage) && !locked,
         archived: ctx.repo.archived,
         msg,
         err,
-    };
-    let body = html! { (ctx.header(ui::Tab::Issues, "HEAD")) (uii::show(&d)) };
-    let status = if err.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
-    Ok((status, ctx.page(&format!("{} #{}", issue.title, issue.number), body)).into_response())
+        head: None,
+        merge_box: None,
+        extra_side: None,
+    }
 }
 
 async fn show(State(app): St, Viewer(v): Viewer, Path((owner, name, number)): Path<(String, String, i64)>) -> Res {
@@ -332,6 +396,9 @@ async fn comment(State(app): St, Authed(u): Authed, Path((owner, name, number)):
         return render_issue(&app, &ctx, number, None, Some(e));
     }
     let action = f.action.as_deref().unwrap_or("comment");
+    if action != "comment" && issue.merged {
+        return render_issue(&app, &ctx, number, None, Some("This pull request is merged."));
+    }
     let can_close = Some(u.id) == issue.author_id || can_triage(&ctx);
     if action != "comment" && !can_close {
         return render_issue(&app, &ctx, number, None, Some("You can't change this issue's state."));
@@ -351,7 +418,7 @@ async fn comment(State(app): St, Authed(u): Authed, Path((owner, name, number)):
         }
         _ => {}
     }
-    Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
+    Ok(back(&ctx, &issue))
 }
 
 async fn edit(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>, Form(f): Form<NewF>) -> Res {
@@ -367,7 +434,7 @@ async fn edit(State(app): St, Authed(u): Authed, Path((owner, name, number)): Pa
     if f.body != issue.body {
         record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
     }
-    Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
+    Ok(back(&ctx, &issue))
 }
 
 /// Triage actions need write access; others get the issue page with an error.
@@ -384,7 +451,7 @@ async fn set_labels(State(app): St, Authed(u): Authed, Path((owner, name, number
     let issue = load_issue(&app, &ctx, number)?;
     let ids: Vec<i64> = form_pairs(&body).into_iter().filter(|(k, _)| k == "label").filter_map(|(_, v)| v.parse().ok()).collect();
     app.db.set_issue_labels(ctx.repo.id, issue.id, &ids, u.id)?;
-    Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
+    Ok(back(&ctx, &issue))
 }
 
 #[derive(Deserialize)]
@@ -408,7 +475,7 @@ async fn assign(State(app): St, Authed(u): Authed, Path((owner, name, number)): 
     if let Some(n) = f.remove.as_deref() {
         app.db.remove_assignee(issue.id, n, u.id)?;
     }
-    Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
+    Ok(back(&ctx, &issue))
 }
 
 #[derive(Deserialize)]
@@ -423,7 +490,7 @@ async fn set_milestone(State(app): St, Authed(u): Authed, Path((owner, name, num
     if app.db.set_issue_milestone(ctx.repo.id, &issue, m, u.id).is_err() {
         return render_issue(&app, &ctx, number, None, Some("No such milestone."));
     }
-    Ok(see_other(&format!("{}/issues/{number}", ctx.base())))
+    Ok(back(&ctx, &issue))
 }
 
 #[derive(Deserialize)]
@@ -446,7 +513,7 @@ async fn comment_edit(State(app): St, Authed(u): Authed, Path((owner, name, id))
     }
     app.db.edit_comment(id, &f.body)?;
     record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
-    Ok(see_other(&format!("{}/issues/{}#c{id}", ctx.base(), issue.number)))
+    Ok(see_other(&format!("{}/{}/{}#c{id}", ctx.base(), kind_of(&issue), issue.number)))
 }
 
 async fn comment_delete(State(app): St, Authed(u): Authed, Path((owner, name, id)): Path<(String, String, i64)>) -> Res {
@@ -457,7 +524,7 @@ async fn comment_delete(State(app): St, Authed(u): Authed, Path((owner, name, id
         return render_issue(&app, &ctx, issue.number, None, Some("You can't delete this comment."));
     }
     app.db.delete_comment(id, issue.id)?;
-    Ok(see_other(&format!("{}/issues/{}", ctx.base(), issue.number)))
+    Ok(back(&ctx, &issue))
 }
 
 /// The comment's issue, which must belong to this repo (no cross-repo id games).
@@ -631,6 +698,12 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/issues/{number}/labels", post(set_labels))
         .route("/{owner}/{name}/issues/{number}/assignees", post(assign))
         .route("/{owner}/{name}/issues/{number}/milestone", post(set_milestone))
+        .route("/{owner}/{name}/pulls", get(list_pulls))
+        .route("/{owner}/{name}/pulls/{number}/comments", post(comment))
+        .route("/{owner}/{name}/pulls/{number}/edit", post(edit))
+        .route("/{owner}/{name}/pulls/{number}/labels", post(set_labels))
+        .route("/{owner}/{name}/pulls/{number}/assignees", post(assign))
+        .route("/{owner}/{name}/pulls/{number}/milestone", post(set_milestone))
         .route("/{owner}/{name}/comments/{id}/edit", post(comment_edit))
         .route("/{owner}/{name}/comments/{id}/delete", post(comment_delete))
         .route("/{owner}/{name}/labels", get(labels).post(label_create))

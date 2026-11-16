@@ -102,8 +102,17 @@ fn hook_pre_receive() -> Result<(), String> {
         let line = line.map_err(|e| e.to_string())?;
         let mut it = line.split_whitespace();
         let (Some(old), Some(new), Some(refname)) = (it.next(), it.next(), it.next()) else { continue };
+        // PR heads are maintained by loom; a push there could spoof a PR's contents.
+        if refname.starts_with("refs/pull/") {
+            errors.push(format!("{refname} is managed by loom"));
+            continue;
+        }
         let Some(branch) = refname.strip_prefix("refs/heads/") else { continue };
         let Some(rule) = rules.iter().find(|r| r.branch == branch) else { continue };
+        if rule.require_pr && !zero(new) {
+            errors.push(format!("branch '{branch}' only accepts changes through pull requests"));
+            continue;
+        }
         if zero(new) {
             if !rule.allow_delete {
                 errors.push(format!("branch '{branch}' is protected: deletion not allowed"));
@@ -124,63 +133,25 @@ fn hook_pre_receive() -> Result<(), String> {
     Err(errors.iter().map(|e| format!("loom: {e}")).collect::<Vec<_>>().join("\n"))
 }
 
-/// Runs after a successful push. Commits newly reachable from the default
-/// branch that mention `#N` get a timeline entry; `fixes #N` closes it.
-/// Never fails the push: errors only print.
+/// Runs after a successful push; see `hooks::after_update`. Never fails the
+/// push: problems are only printed.
 fn hook_post_receive() -> Result<(), String> {
     use std::io::BufRead;
-    const MAX_COMMITS: usize = 500;
-    let data = std::env::var_os("LOOM_DATA").ok_or("LOOM_DATA not set")?;
+    let data = std::path::PathBuf::from(std::env::var_os("LOOM_DATA").ok_or("LOOM_DATA not set")?);
     let repo_id: i64 = std::env::var("LOOM_REPO_ID").ok().and_then(|v| v.parse().ok()).ok_or("LOOM_REPO_ID not set")?;
-    let db = db::Db::open(&std::path::Path::new(&data).join("loom.db")).map_err(|e| e.to_string())?;
+    let db = db::Db::open(&data.join("loom.db")).map_err(|e| e.to_string())?;
+    let repo = db.repo_by_id(repo_id).map_err(|e| e.to_string())?.ok_or("repo not found")?;
     let pusher = std::env::var("LOOM_USER").ok().and_then(|n| db.user_by_name(&n).ok().flatten());
-    let head = std::process::Command::new("git").args(["symbolic-ref", "-q", "HEAD"]).output().map_err(|e| e.to_string())?;
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
-    let zero = |s: &str| s.bytes().all(|b| b == b'0');
-
-    for line in std::io::stdin().lock().lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let mut it = line.split_whitespace();
-        let (Some(old), Some(new), Some(refname)) = (it.next(), it.next(), it.next()) else { continue };
-        if refname != head || zero(new) {
-            continue;
-        }
-        // Commits now reachable from the default branch that weren't before.
-        let range = if zero(old) { new.to_owned() } else { format!("{old}..{new}") };
-        let out = std::process::Command::new("git")
-            .args(["log", "--reverse", "--format=%H%x00%s%x00%B%x1e", "-n", &MAX_COMMITS.to_string(), &range])
-            .output()
-            .map_err(|e| e.to_string())?;
-        for rec in String::from_utf8_lossy(&out.stdout).split('\x1e') {
-            let mut parts = rec.trim_start_matches('\n').splitn(3, '\0');
-            let (Some(sha), Some(subject), Some(msg)) = (parts.next(), parts.next(), parts.next()) else { continue };
-            if sha.len() != 40 {
-                continue;
-            }
-            for (repo, number, closing) in crate::refs::issue_refs(msg) {
-                if repo.is_some() {
-                    continue; // cross-repo commit refs: only same-repo for now
-                }
-                let Ok(Some(issue_id)) = db.issue_id(repo_id, number) else { continue };
-                let actor = pusher.as_ref().map(|u| u.id);
-                let data = format!("{sha}\t{subject}");
-                if closing {
-                    let key = format!("commit_closed:{sha}:{issue_id}");
-                    match db.set_issue_closed(issue_id, true, actor, "commit_closed", &data, Some(&key)) {
-                        // Already closed: still show the commit in the timeline.
-                        Ok(false) => {
-                            let _ = db.add_event(issue_id, actor, "commit_ref", &data, Some(&format!("commit_ref:{sha}:{issue_id}")));
-                        }
-                        Ok(true) => {}
-                        Err(e) => eprintln!("loom: close #{number}: {e}"),
-                    }
-                } else {
-                    let key = format!("commit_ref:{sha}:{issue_id}");
-                    let _ = db.add_event(issue_id, actor, "commit_ref", &data, Some(&key));
-                }
-            }
-        }
-    }
+    let updates: Vec<crate::hooks::Update> = std::io::stdin()
+        .lock()
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some(crate::hooks::Update { old: it.next()?.to_owned(), new: it.next()?.to_owned(), refname: it.next()?.to_owned() })
+        })
+        .collect();
+    crate::hooks::after_update(&db, &data, &repo, pusher.as_ref(), &updates);
     Ok(())
 }
 

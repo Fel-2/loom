@@ -86,6 +86,7 @@ pub enum Tab {
     Commits,
     Refs,
     Issues,
+    Pulls,
     Settings,
 }
 
@@ -98,6 +99,7 @@ pub struct Meta {
     pub parent: Option<String>,
     pub can_admin: bool,
     pub open_issues: i64,
+    pub open_pulls: i64,
 }
 
 pub struct Clone<'a> {
@@ -146,6 +148,7 @@ pub fn repo_header(repo: &Repo, clone: &Clone<'_>, meta: &Meta, tab: Tab, rev: &
                 a.active[tab == Tab::Commits] href={ (base) "/log/" (rev) } { "commits" }
                 a.active[tab == Tab::Refs] href={ (base) "/refs" } { "branches & tags" }
                 a.active[tab == Tab::Issues] href={ (base) "/issues" } { "issues" @if meta.open_issues > 0 { span.tab-count { (meta.open_issues) } } }
+                a.active[tab == Tab::Pulls] href={ (base) "/pulls" } { "pulls" @if meta.open_pulls > 0 { span.tab-count { (meta.open_pulls) } } }
                 @if meta.can_admin { a.active[tab == Tab::Settings] href={ (base) "/settings" } { "settings" } }
             }
         }
@@ -688,6 +691,7 @@ pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: 
                                 @if p.allow_force_push { "force-push allowed" } @else { "no force-push" }
                                 " · "
                                 @if p.allow_delete { "deletion allowed" } @else { "no deletion" }
+                                @if p.require_pr { " · PRs only" }
                             }
                             span.grow {}
                             form.inline method="post" action={ (base) "/protect/remove" } {
@@ -701,6 +705,7 @@ pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: 
                     input name="branch" placeholder="branch, e.g. main" required value=[d.default_branch];
                     label.check { input type="checkbox" name="allow_force_push" value="1"; "allow force-push" }
                     label.check { input type="checkbox" name="allow_delete" value="1"; "allow delete" }
+                    label.check { input type="checkbox" name="require_pr" value="1"; "require pull request" }
                     button.btn { "protect" }
                 }
             }

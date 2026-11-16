@@ -105,6 +105,6 @@ Backup = copy `loom.db` (via `.backup`) + `repos/`.
 2. ✅ **Accounts + transport** (tests/smoke.sh) — users, sessions, SSH keys, embedded SSH, smart HTTP.
 3. **Repo management** — create/fork/settings/collaborators/orgs/visibility. ✅ (tests/m3.sh)
 4. ✅ **Issues** (tests/m4.sh)
-5. **Pull requests**
+5. ✅ **Pull requests** (tests/m5.sh)
 6. **Webhooks, statuses, API, search, notifications**
 7. **Benchmark harness vs Forgejo** (RSS idle/loaded, p50/p99 latency) — run early, run often.

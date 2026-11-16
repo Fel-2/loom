@@ -39,6 +39,8 @@ pub struct Issue {
     pub updated: i64,
     pub closed_at: Option<i64>,
     pub labels: Vec<Label>,
+    /// PRs only.
+    pub merged: bool,
 }
 
 pub struct Comment {
@@ -73,8 +75,9 @@ pub fn valid_color(c: &str) -> bool {
 }
 
 const ISSUE_COLS: &str = "i.id, i.number, i.is_pr, i.title, i.body, u.name, i.author_id, i.closed, i.milestone_id,
-     m.title, i.comments, i.created, i.updated, i.closed_at";
-const ISSUE_FROM: &str = "issues i LEFT JOIN users u ON u.id = i.author_id LEFT JOIN milestones m ON m.id = i.milestone_id";
+     m.title, i.comments, i.created, i.updated, i.closed_at, COALESCE(p.merged, 0)";
+const ISSUE_FROM: &str = "issues i LEFT JOIN users u ON u.id = i.author_id LEFT JOIN milestones m ON m.id = i.milestone_id
+     LEFT JOIN pulls p ON p.issue_id = i.id";
 
 fn issue_row(r: &Row<'_>) -> Result<Issue> {
     Ok(Issue {
@@ -93,6 +96,7 @@ fn issue_row(r: &Row<'_>) -> Result<Issue> {
         updated: r.get(12)?,
         closed_at: r.get(13)?,
         labels: Vec::new(),
+        merged: r.get(14)?,
     })
 }
 

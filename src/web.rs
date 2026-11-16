@@ -190,6 +190,7 @@ impl Ctx {
             parent,
             can_admin: access >= Access::Admin,
             open_issues: app.db.open_count(repo.id, false)?,
+            open_pulls: app.db.open_count(repo.id, true)?,
         };
         Ok(Ctx { viewer, repo, access, dir, http, ssh, meta })
     }
@@ -199,7 +200,7 @@ impl Ctx {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (&self.repo.owner, &self.repo.name, &self.repo.description, self.repo.private, self.repo.archived).hash(&mut h);
-        (self.meta.stars, self.meta.starred, self.meta.forks, &self.meta.parent, self.meta.can_admin, self.meta.open_issues).hash(&mut h);
+        (self.meta.stars, self.meta.starred, self.meta.forks, &self.meta.parent, self.meta.can_admin, self.meta.open_issues, self.meta.open_pulls).hash(&mut h);
         h.finish()
     }
 
@@ -756,6 +757,7 @@ struct ProtectF {
     branch: String,
     allow_force_push: Option<String>,
     allow_delete: Option<String>,
+    require_pr: Option<String>,
 }
 
 async fn settings_protect(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>, Form(f): Form<ProtectF>) -> Res {
@@ -766,7 +768,12 @@ async fn settings_protect(State(app): St, Authed(u): Authed, Path((owner, name))
     if !valid {
         return settings_response(&app, &ctx, None, Some("Not a valid branch name."));
     }
-    let p = crate::db::Protection { branch: branch.to_owned(), allow_force_push: f.allow_force_push.is_some(), allow_delete: f.allow_delete.is_some() };
+    let p = crate::db::Protection {
+        branch: branch.to_owned(),
+        allow_force_push: f.allow_force_push.is_some(),
+        allow_delete: f.allow_delete.is_some(),
+        require_pr: f.require_pr.is_some(),
+    };
     app.db.set_protection(ctx.repo.id, &p)?;
     settings_response(&app, &ctx, Some(&format!("'{branch}' is protected.")), None)
 }
@@ -962,6 +969,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/settings/transfer", post(settings_transfer))
         .route("/{owner}/{name}/settings/delete", post(settings_delete))
         .merge(crate::issues_web::routes())
+        .merge(crate::pulls_web::routes())
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
         .with_state(app)

@@ -143,6 +143,8 @@ pub async fn info_refs(
     };
     let proto = git_protocol(&headers);
     let mut cmd = Command::new("git");
+    // loom's scratch refs (fork compares) are never served.
+    cmd.args(["-c", "uploadpack.hideRefs=refs/loom"]);
     cmd.args([svc.name(), "--stateless-rpc", "--http-backend-info-refs"]).arg(&dir);
     if let Some(p) = &proto {
         cmd.env("GIT_PROTOCOL", p);
@@ -194,6 +196,8 @@ async fn rpc(app: Arc<App>, owner: String, name: String, svc: Service, headers: 
     let mut cmd = Command::new("git");
     if svc == Service::Receive {
         app.receive_pack_setup(&mut cmd, &repo, user.as_ref());
+    } else {
+        cmd.args(["-c", "uploadpack.hideRefs=refs/loom"]);
     }
     cmd.args([svc.name(), "--stateless-rpc"]).arg(&dir);
     if let Some(p) = git_protocol(&headers) {
