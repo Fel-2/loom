@@ -27,6 +27,10 @@ Tangled, whose code is MIT; no Tangled brand assets are used).
   references, post-receive commit linking): 9.3 MB idle, ~52 MB peak at 32
   concurrent (mix incl. issue pages), 14.9 MB after load + trim. Issue list
   and issue page render in < 1 ms.
+- loom M5 measured (+ pull requests): 9.6 MB idle, ~44 MB peak at 32
+  concurrent (mix incl. PR conversation/files/commits/revisions), 16.7 MB
+  after load + trim. PR files tab with a 430 KB diff: 6 ms; conversation:
+  12 ms (several git subprocesses for mergeability: a cache candidate).
 - No federation.
 - Git reads in-process via gitoxide (`gix`). Spawn `git` only for
   `upload-pack` / `receive-pack` (clone/fetch/push) and merges.
