@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::app::{App, Login};
 use crate::db::{self, Access, Repo, User};
-use crate::{git, githttp, ui};
+use crate::{git, githttp, totp, ui};
 
 pub(crate) type St = State<Arc<App>>;
 
@@ -430,6 +430,29 @@ async fn commit(State(app): St, Viewer(v): Viewer, Path((owner, name, rev)): Pat
     .await
 }
 
+async fn blame(State(app): St, Viewer(v): Viewer, Path((owner, name, rest)): Path<(String, String, String)>, headers: HeaderMap) -> Res {
+    let ctx = Ctx::load(&app, v, &owner, &name)?;
+    blocking(move || {
+        let repo = ctx.open()?;
+        let (id, rev, path) = git::split_rev(&repo, &rest)?;
+        let (_, data) = git::blob(&repo, id, path)?;
+        let total = data.iter().filter(|b| **b == b'\n').count() + usize::from(!data.is_empty() && !data.ends_with(b"\n"));
+        let _ = &repo;
+        let lines = git::blame(&ctx.dir, &id.to_string(), path, 2000)?;
+        Ok(ctx.etag(&headers, format!("bl-{id}-{path}"), || {
+            let body = html! {
+                (ctx.header(ui::Tab::Overview, rev))
+                div.stack {
+                    (ui::crumbs(&ctx.base(), rev, path))
+                    (ui::blame(&ctx.base(), rev, path, &lines, total))
+                }
+            };
+            ctx.page(&format!("blame {path}"), body)
+        }))
+    })
+    .await
+}
+
 async fn refs(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(String, String)>) -> Res {
     let ctx = Ctx::load(&app, v, &owner, &name)?;
     blocking(move || {
@@ -498,11 +521,23 @@ fn session_cookie(app: &App, value: &str, max_age: i64) -> HeaderValue {
         .expect("cookie header")
 }
 
-async fn login(State(app): St, Form(f): Form<LoginF>) -> Res {
+/// Client address for throttling. X-Forwarded-For is only believed when
+/// LOOM_TRUST_PROXY is set (i.e. loom sits behind a reverse proxy).
+pub fn client_ip(peer: Option<std::net::SocketAddr>, headers: &HeaderMap) -> String {
+    if std::env::var("LOOM_TRUST_PROXY").is_ok_and(|v| v == "1") {
+        if let Some(ip) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()) {
+            return ip.trim().to_owned();
+        }
+    }
+    peer.map_or_else(|| "unknown".into(), |p| p.ip().to_string())
+}
+
+async fn login(State(app): St, ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, headers: HeaderMap, Form(f): Form<LoginF>) -> Res {
     let next = safe_next(f.next.as_deref());
     let a = app.clone();
     let name = f.name.trim().to_owned();
-    let result = blocking(move || Ok(a.login(&name, &f.password))).await?;
+    let ip = client_ip(Some(peer), &headers);
+    let result = blocking(move || Ok(a.login(&name, &f.password, &ip))).await?;
     let err = match result {
         Login::Ok(user) => {
             let raw = app.db.create_session(user.id)?;
@@ -510,10 +545,95 @@ async fn login(State(app): St, Form(f): Form<LoginF>) -> Res {
             res.headers_mut().insert(header::SET_COOKIE, session_cookie(&app, &raw, db::SESSION_DAYS * 86400));
             return Ok(res);
         }
+        Login::NeedsTotp(user) => {
+            let raw = app.db.create_pending_session(user.id)?;
+            let mut res = Redirect::to("/login/totp").into_response();
+            res.headers_mut().insert(header::SET_COOKIE, session_cookie(&app, &raw, 300));
+            return Ok(res);
+        }
         Login::Bad => "Wrong user name or password.",
         Login::Throttled => "Too many failed attempts. Try again in 15 minutes.",
     };
     Ok((StatusCode::UNAUTHORIZED, ui::page("sign in", None, ui::login(&next, Some(err)))).into_response())
+}
+
+async fn totp_page(State(app): St, headers: HeaderMap) -> Res {
+    let pending = cookie(&headers, COOKIE).and_then(|raw| app.db.pending_session_user(raw).ok().flatten());
+    match pending {
+        Some(u) => Ok(ui::page("two-factor", None, ui::totp_login(&u.name, None)).into_response()),
+        None => Ok(Redirect::to("/login").into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+struct TotpF {
+    code: String,
+}
+
+async fn totp_submit(State(app): St, headers: HeaderMap, Form(f): Form<TotpF>) -> Res {
+    let Some(raw) = cookie(&headers, COOKIE).map(str::to_owned) else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let Some(u) = app.db.pending_session_user(&raw)? else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let (secret, enabled) = app.db.totp(u.id)?;
+    if enabled && totp::verify(&secret, &f.code, db::now()) {
+        app.db.confirm_session(&raw)?;
+        let mut res = Redirect::to("/").into_response();
+        res.headers_mut().insert(header::SET_COOKIE, session_cookie(&app, &raw, db::SESSION_DAYS * 86400));
+        return Ok(res);
+    }
+    Ok((StatusCode::UNAUTHORIZED, ui::page("two-factor", None, ui::totp_login(&u.name, Some("Wrong code.")))).into_response())
+}
+
+// ---------- two-factor settings ----------
+
+async fn totp_settings(State(app): St, Authed(u): Authed) -> Res {
+    let (secret, enabled) = app.db.totp(u.id)?;
+    let body = if enabled {
+        ui::totp_settings(&u.name, None, true, None)
+    } else {
+        // A fresh secret is generated for the form; enabling requires a code
+        // from it, so an abandoned form changes nothing.
+        let s = if secret.is_empty() { totp::new_secret() } else { secret };
+        ui::totp_settings(&u.name, Some(&s), false, None)
+    };
+    Ok(ui::page("two-factor", Some(&u), body).into_response())
+}
+
+#[derive(Deserialize)]
+struct TotpSetupF {
+    secret: String,
+    code: String,
+}
+
+async fn totp_enable(State(app): St, Authed(u): Authed, Form(f): Form<TotpSetupF>) -> Res {
+    let (current, enabled) = app.db.totp(u.id)?;
+    if enabled {
+        return Ok(Redirect::to("/settings/2fa").into_response());
+    }
+    let secret = if current.is_empty() { f.secret.trim().to_uppercase() } else { current };
+    if totp::base32_decode(&secret).is_none_or(|v| v.len() < 10) {
+        return Ok((StatusCode::BAD_REQUEST, ui::page("two-factor", Some(&u), ui::totp_settings(&u.name, Some(&secret), false, Some("That secret doesn't look right; start over.")))).into_response());
+    }
+    if !totp::verify(&secret, &f.code, db::now()) {
+        return Ok((StatusCode::BAD_REQUEST, ui::page("two-factor", Some(&u), ui::totp_settings(&u.name, Some(&secret), false, Some("Wrong code. Check your app's clock and try again.")))).into_response());
+    }
+    app.db.set_totp(u.id, &secret, true)?;
+    Ok(ui::page("two-factor", Some(&u), ui::totp_settings(&u.name, None, true, Some("Two-factor authentication is on."))).into_response())
+}
+
+async fn totp_disable(State(app): St, Authed(u): Authed, Form(f): Form<TotpF>) -> Res {
+    let (secret, enabled) = app.db.totp(u.id)?;
+    if !enabled {
+        return Ok(Redirect::to("/settings/2fa").into_response());
+    }
+    if !totp::verify(&secret, &f.code, db::now()) {
+        return Ok((StatusCode::BAD_REQUEST, ui::page("two-factor", Some(&u), ui::totp_settings(&u.name, None, true, Some("Wrong code; not disabled.")))).into_response());
+    }
+    app.db.set_totp(u.id, "", false)?;
+    Ok(ui::page("two-factor", Some(&u), ui::totp_settings(&u.name, None, false, Some("Two-factor authentication is off."))).into_response())
 }
 
 async fn logout(State(app): St, headers: HeaderMap) -> Res {
@@ -607,15 +727,17 @@ struct PasswordF {
     new: String,
 }
 
-async fn password_change(State(app): St, Authed(u): Authed, Form(f): Form<PasswordF>) -> Res {
+async fn password_change(State(app): St, Authed(u): Authed, ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, headers: HeaderMap, Form(f): Form<PasswordF>) -> Res {
     let fail = |msg: &str| Ok((StatusCode::BAD_REQUEST, ui::page("password", Some(&u), ui::password(None, Some(msg)))).into_response());
     if f.new.chars().count() < 8 {
         return fail("The new password must be at least 8 characters.");
     }
     let (a, name) = (app.clone(), u.name.clone());
+    let ip = client_ip(Some(peer), &headers);
     let current = f.current;
-    match blocking(move || Ok(a.login(&name, &current))).await? {
+    match blocking(move || Ok(a.login(&name, &current, &ip))).await? {
         Login::Ok(_) => {}
+        Login::NeedsTotp(_) => {} // right password; 2FA is a separate step
         Login::Bad => return fail("Current password is wrong."),
         Login::Throttled => return fail("Too many failed attempts. Try again in 15 minutes."),
     }
@@ -723,10 +845,12 @@ fn settings_response(app: &App, ctx: &Ctx, msg: Option<&str>, err: Option<&str>)
         })
         .collect();
     let sbase = format!("{}/settings", ctx.base());
+    let mirror = crate::mirrors::section(&ctx.repo, &app.db, &sbase);
     let body = html! {
         (ctx.header(ui::Tab::Settings, &rev))
         (ui::repo_settings(&ctx.repo, &data, msg, err))
         div.mt { (crate::ui_social::hooks_section(&sbase, &hooks)) }
+        div.mt { (mirror) }
     };
     let status = if err.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
     Ok((status, ctx.page("settings", body)).into_response())
@@ -836,6 +960,59 @@ async fn settings_unprotect(State(app): St, Authed(u): Authed, Path((owner, name
 struct MoveF {
     owner: Option<String>,
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MirrorF {
+    url: String,
+    hours: Option<i64>,
+}
+
+async fn mirror_set(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>, Form(f): Form<MirrorF>) -> Res {
+    let ctx = admin_ctx(&app, u.clone(), &owner, &name).await?;
+    let url = f.url.trim().to_owned();
+    if !crate::gitops::valid_mirror_url(&url) {
+        return settings_response(&app, &ctx, None, Some("Mirror URLs must start with http://, https://, ssh:// or git://."));
+    }
+    let hours = f.hours.unwrap_or(6).clamp(1, 168);
+    app.db.set_mirror_config(ctx.repo.id, &url, hours)?;
+    app.db.set_mirror(ctx.repo.id, true)?;
+    // First sync right away, synchronously, so the admin sees errors here.
+    let (a, id) = (app.clone(), ctx.repo.id);
+    let r = blocking(move || {
+        crate::mirrors::sync(&a, id, &url);
+        Ok(())
+    })
+    .await;
+    let ctx = admin_ctx(&app, u, &owner, &name).await?;
+    match r.map_err(|e| match e {
+        Err::Internal(m) => m,
+        _ => "sync failed".into(),
+    }) {
+        Ok(()) => settings_response(&app, &ctx, Some("Mirror configured; the first sync ran. Check the status below."), None),
+        Err(e) => settings_response(&app, &ctx, None, Some(&format!("Mirror configured but the first sync failed: {e}"))),
+    }
+}
+
+async fn mirror_delete(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>) -> Res {
+    let ctx = admin_ctx(&app, u.clone(), &owner, &name).await?;
+    app.db.remove_mirror(ctx.repo.id)?;
+    app.db.set_mirror(ctx.repo.id, false)?;
+    settings_response(&app, &ctx, Some("Mirror removed; the repo accepts pushes again."), None)
+}
+
+async fn mirror_sync(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>) -> Res {
+    let ctx = admin_ctx(&app, u.clone(), &owner, &name).await?;
+    let Some((url, _, _, _, _)) = app.db.mirror(ctx.repo.id)? else {
+        return settings_response(&app, &ctx, None, Some("No mirror configured."));
+    };
+    let (a, id) = (app.clone(), ctx.repo.id);
+    blocking(move || {
+        crate::mirrors::sync(&a, id, &url);
+        Ok(())
+    })
+    .await?;
+    settings_response(&app, &ctx, Some("Sync finished."), None)
 }
 
 async fn settings_move(app: Arc<App>, u: User, owner: String, name: String, f: MoveF) -> Res {
@@ -980,6 +1157,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/", get(index))
         .route("/static/style.css", get(css))
         .route("/login", get(login_page).post(login))
+        .route("/login/totp", get(totp_page).post(totp_submit))
         .route("/logout", post(logout))
         .route("/new", get(new_page).post(new_create))
         .route("/new/org", get(new_org_page).post(new_org))
@@ -989,6 +1167,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/settings/tokens", get(tokens_page).post(tokens_add))
         .route("/settings/tokens/{id}/delete", post(tokens_delete))
         .route("/settings/password", get(password_page).post(password_change))
+        .route("/settings/2fa", get(totp_settings))
+        .route("/settings/2fa/enable", post(totp_enable))
+        .route("/settings/2fa/disable", post(totp_disable))
         .route("/{owner}", get(owner))
         .route("/{owner}/settings", get(org_settings))
         .route("/{owner}/settings/general", post(org_general))
@@ -1002,6 +1183,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/tree/{*rest}", get(tree))
         .route("/{owner}/{name}/blob/{*rest}", get(blob))
         .route("/{owner}/{name}/raw/{*rest}", get(raw))
+        .route("/{owner}/{name}/blame/{*rest}", get(blame))
         .route("/{owner}/{name}/log/{*rev}", get(log))
         .route("/{owner}/{name}/commit/{rev}", get(commit))
         .route("/{owner}/{name}/refs", get(refs))
@@ -1016,10 +1198,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/settings/rename", post(settings_rename))
         .route("/{owner}/{name}/settings/transfer", post(settings_transfer))
         .route("/{owner}/{name}/settings/delete", post(settings_delete))
+        .route("/{owner}/{name}/settings/mirror", post(mirror_set))
+        .route("/{owner}/{name}/settings/mirror/sync", post(mirror_sync))
+        .route("/{owner}/{name}/settings/mirror/delete", post(mirror_delete))
         .merge(crate::issues_web::routes())
         .merge(crate::pulls_web::routes())
         .merge(crate::api::routes())
         .merge(crate::social_web::routes())
+        .merge(crate::releases::routes())
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
         .with_state(app)

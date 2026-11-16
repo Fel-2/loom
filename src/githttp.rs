@@ -75,7 +75,7 @@ async fn basic_user(app: &Arc<App>, headers: &HeaderMap) -> Option<User> {
         return app.db.token_user(secret).ok().flatten();
     }
     let (app, user, secret) = (app.clone(), user.to_owned(), secret.to_owned());
-    tokio::task::spawn_blocking(move || match app.login(&user, &secret) {
+    tokio::task::spawn_blocking(move || match app.login(&user, &secret, "git-http") {
         crate::app::Login::Ok(u) => Some(u),
         _ => None,
     })
@@ -149,6 +149,10 @@ pub async fn info_refs(
     if let Some(p) = &proto {
         cmd.env("GIT_PROTOCOL", p);
     }
+    let _permit = match app.git_slots.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => return internal("git slot closed"),
+    };
     let out = match cmd.stdin(Stdio::null()).stderr(Stdio::inherit()).output().await {
         Ok(o) if o.status.success() => o.stdout,
         Ok(o) => return internal(&format!("git {} exited {}", svc.name(), o.status)),
@@ -203,6 +207,11 @@ async fn rpc(app: Arc<App>, owner: String, name: String, svc: Service, headers: 
     if let Some(p) = git_protocol(&headers) {
         cmd.env("GIT_PROTOCOL", p);
     }
+    // At most LOOM_MAX_GIT streaming git processes; the permit is dropped when
+    // the child exits (in the reaper task below).
+    let Ok(permit) = app.git_slots.clone().acquire_owned().await else {
+        return internal("git slot closed");
+    };
     let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn() {
         Ok(c) => c,
         Err(e) => return internal(&format!("spawn git: {e}")),
@@ -240,6 +249,7 @@ async fn rpc(app: Arc<App>, owner: String, name: String, svc: Service, headers: 
     // Reap the child; after a push, make sure HEAD points somewhere real.
     tokio::spawn(async move {
         let ok = child.wait().await.is_ok_and(|s| s.success());
+        drop(permit);
         if ok && svc == Service::Receive {
             let _ = tokio::task::spawn_blocking(move || git::fix_head(&dir)).await;
         }

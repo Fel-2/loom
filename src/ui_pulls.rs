@@ -288,7 +288,8 @@ pub fn files_view(v: &FilesView<'_>) -> Markup {
     let (adds, dels) = v.files.iter().fold((0, 0), |(a, d), f| (a + f.adds, d + f.dels));
     html! {
         p.muted.stat { (v.files.len()) " files changed, " span.add { "+" (adds) } " " span.del { "-" (dels) } }
-        @for (i, f) in v.files.iter().enumerate() {
+        @if v.files.len() > crate::ui::MAX_DIFF_FILES { p.muted.small { "Showing the first " (crate::ui::MAX_DIFF_FILES) " of " (v.files.len()) " changed files." } }
+        @for (i, f) in v.files.iter().take(crate::ui::MAX_DIFF_FILES).enumerate() {
             div.card.flush.diff id={ "f" (i) } {
                 div.card-head {
                     span class={ "st st-" (f.status) } { (f.status) }
@@ -301,7 +302,7 @@ pub fn files_view(v: &FilesView<'_>) -> Markup {
                     p.pad.muted { "Binary or large file not shown." }
                 } @else {
                     table.code {
-                        @for l in &f.lines {
+                        @for l in f.lines.iter().take(crate::ui::MAX_DIFF_LINES) {
                             @let key = line_key(l);
                             @let anchor = key.map(|(s, n)| format!("{}-{}{}", i, s, n));
                             @match l {
@@ -350,6 +351,7 @@ pub fn files_view(v: &FilesView<'_>) -> Markup {
                             }
                         }
                     }
+                    @if f.lines.len() > crate::ui::MAX_DIFF_LINES { p.pad.muted.small { "Diff truncated at " (crate::ui::MAX_DIFF_LINES) " lines." } }
                 }
             }
         }

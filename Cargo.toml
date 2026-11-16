@@ -5,8 +5,8 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form", "json"] }
-tokio = { version = "1", features = ["rt", "net", "macros", "signal", "process", "io-util", "time", "sync"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query", "form", "json", "multipart"] }
+tokio = { version = "1", features = ["rt", "net", "macros", "signal", "process", "io-util", "time", "sync", "fs"] }
 maud = { version = "0.27", features = ["axum"] }
 gix = { version = "0.90", default-features = false, features = ["revision", "blob-diff", "blame", "pack-cache-lru-static", "sha1"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
@@ -24,6 +24,7 @@ base64 = "0.23"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 hmac = "0.13"
 serde_json = "1"
+sha1 = "0.11"
 
 # Day-to-day optimized build: thin LTO + parallel codegen = fast, low RAM.
 [profile.release]

@@ -234,6 +234,75 @@ pub fn branch_tip(dir: &Path, branch: &str) -> Option<ObjectId> {
     Some(r.peel_to_commit().ok()?.id)
 }
 
+#[derive(Clone)]
+pub struct BlameLine {
+    pub sha: String,
+    pub author: String,
+    pub time: i64,
+    pub text: String,
+}
+
+/// Per-line blame via `git blame` (much faster than walking history in gix).
+/// Immutable per (commit, path), so memoized; entries are dropped wholesale
+/// when the cache is full (blame output can be large).
+pub fn blame(dir: &Path, commit: &str, path: &str, max_lines: usize) -> Result<Vec<BlameLine>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    const MAX_ENTRIES: usize = 24;
+    static CACHE: OnceLock<Mutex<HashMap<(String, String, String, usize), Arc<Vec<BlameLine>>>>> = OnceLock::new();
+    let key = (dir.display().to_string(), commit.to_owned(), path.to_owned(), max_lines);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(v.to_vec());
+    }
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(dir)
+        // `commit` is always a full sha (validated by the caller), so it can't be
+        // mistaken for an option; --end-of-options would break `-- <path>` here.
+        .args(["blame", "--line-porcelain", "-L", &format!("1,{max_lines}"), commit, "--", path])
+        .env_remove("GIT_DIR")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .map_err(|e| Error::Git(e.to_string()))?;
+    if !out.status.success() {
+        return Err(Error::NotFound);
+    }
+    let mut by_commit: HashMap<String, (String, i64)> = HashMap::new();
+    let mut cur_sha = String::new();
+    let (mut author, mut time) = (String::new(), 0i64);
+    let mut lines = Vec::new();
+    for l in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some(text) = l.strip_prefix('\t') {
+            if !cur_sha.is_empty() {
+                by_commit.insert(cur_sha.clone(), (author.clone(), time));
+                lines.push(BlameLine { sha: cur_sha.clone(), author: author.clone(), time, text: text.replace('\t', "    ") });
+            }
+            continue;
+        }
+        if l.len() > 40 && l.as_bytes()[40] == b' ' && l[..40].bytes().all(|b| b.is_ascii_hexdigit()) {
+            cur_sha = l[..40].to_owned();
+            if let Some((a, t)) = by_commit.get(&cur_sha) {
+                author = a.clone();
+                time = *t;
+            }
+        } else if let Some(a) = l.strip_prefix("author ") {
+            author = a.to_owned();
+        } else if let Some(t) = l.strip_prefix("author-time ") {
+            time = t.parse().unwrap_or(0);
+        }
+    }
+    let v = Arc::new(lines);
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if c.len() >= MAX_ENTRIES {
+        c.clear();
+    }
+    c.insert(key, v.clone());
+    Ok((*v).clone())
+}
+
+
 pub fn parse_id(hex: &str) -> Option<ObjectId> {
     ObjectId::from_hex(hex.as_bytes()).ok()
 }

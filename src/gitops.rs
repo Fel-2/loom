@@ -242,3 +242,19 @@ pub fn path_log(dir: &Path, rev: &str, path: &str, skip: usize, limit: usize) ->
         _ => Vec::new(),
     }
 }
+
+/// Mirror fetch: force-update local branches and tags from `url`, prune.
+pub fn mirror_fetch(dir: &Path, url: &str) -> Result<String, String> {
+    let o = out(git(dir)
+        .args(["fetch", "--quiet", "--prune", "--prune-tags", "--no-write-fetch-head", "--end-of-options"])
+        .arg(url)
+        .args(["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"])
+        .output())?;
+    if o.status.success() { Ok(stderr(&o)) } else { Err(stderr(&o)) }
+}
+
+/// Mirrors must be real remotes, not local paths (which would expose files).
+pub fn valid_mirror_url(u: &str) -> bool {
+    let scheme_ok = ["https://", "http://", "ssh://", "git://"].iter().any(|s| u.starts_with(s));
+    scheme_ok && u.len() <= 2000 && !u.chars().any(char::is_whitespace) && !u.contains("..")
+}

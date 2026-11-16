@@ -122,3 +122,15 @@ Backup = copy `loom.db` (via `.backup`) + `repos/`.
    (988 MB with Forgejo's git children), 1 vs 43–104 threads, 564 vs 49 req/s.
    After fixes (handle cache, PR summary cache, git log for path history):
    1,176 req/s at the same 4 threads; private memory under load 11 MB.
+
+## 8. Features pass (after the benchmark)
+
+Highlighting (dependency-free scanner, 128 KB cap), blob view capped at 5000
+lines and diffs at 4000 lines/200 files, blame (git blame + bounded memo),
+releases with uploaded assets and `git archive` tarballs, TOTP two-factor with
+`loom user 2fa-off` recovery, pull mirrors (read-only repos, timer-driven),
+per-(IP,user) login throttling, and a cap of 8 concurrent streaming git
+processes (`LOOM_MAX_GIT`). tests/m7.sh: 48 checks.
+
+Still out: Git LFS, per-file last-commit badges (cost ~1 s per large directory,
+which is exactly the latency loom avoids).

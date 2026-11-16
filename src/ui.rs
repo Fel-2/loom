@@ -89,6 +89,7 @@ pub enum Tab {
     Refs,
     Issues,
     Pulls,
+    Releases,
     Settings,
 }
 
@@ -158,6 +159,7 @@ pub fn repo_header(repo: &Repo, clone: &Clone<'_>, meta: &Meta, tab: Tab, rev: &
                 a.active[tab == Tab::Refs] href={ (base) "/refs" } { "branches & tags" }
                 a.active[tab == Tab::Issues] href={ (base) "/issues" } { "issues" @if meta.open_issues > 0 { span.tab-count { (meta.open_issues) } } }
                 a.active[tab == Tab::Pulls] href={ (base) "/pulls" } { "pulls" @if meta.open_pulls > 0 { span.tab-count { (meta.open_pulls) } } }
+                a.active[tab == Tab::Releases] href={ (base) "/releases" } { "releases" }
                 a href={ (base) "/search" } { "search" }
                 @if meta.can_admin { a.active[tab == Tab::Settings] href={ (base) "/settings" } { "settings" } }
             }
@@ -316,9 +318,19 @@ pub fn readme(name: &str, content: &str) -> Markup {
     }
 }
 
+pub const MAX_VIEW_LINES: usize = 5000;
+pub const MAX_DIFF_LINES: usize = 4000;
+pub const MAX_DIFF_FILES: usize = 200;
+
 pub fn blob(base: &str, rev: &str, path: &str, data: &[u8]) -> Markup {
     let binary = data.iter().take(8000).any(|&b| b == 0);
     let text = String::from_utf8_lossy(data);
+    let all: Vec<&str> = text.lines().collect();
+    let truncated = all.len() > MAX_VIEW_LINES;
+    let shown = &all[..all.len().min(MAX_VIEW_LINES)];
+    // Big files aren't read line by line; skip the per-line HTML for them
+    // (bounds CPU and peak memory under load).
+    let hl = (!binary && data.len() <= 128 * 1024).then(|| crate::highlight::lines(path, &shown.join("\n")));
     html! {
         div.card.flush {
             div.card-head {
@@ -332,12 +344,18 @@ pub fn blob(base: &str, rev: &str, path: &str, data: &[u8]) -> Markup {
                 p.pad.muted { "Binary file not shown." }
             } @else {
                 table.code {
-                    @for (i, l) in text.lines().enumerate() {
+                    @for (i, l) in shown.iter().enumerate() {
                         tr id={ "L" (i + 1) } {
                             td.ln { a href={ "#L" (i + 1) } { (i + 1) } }
-                            td.src { (l) }
+                            @match &hl {
+                                Some(h) => td.src { (PreEscaped(h.get(i).cloned().unwrap_or_default())) },
+                                None => td.src { (l) },
+                            }
                         }
                     }
+                }
+                @if truncated {
+                    p.pad.muted { "Showing the first " (MAX_VIEW_LINES) " of " (all.len()) " lines. " a href={ (base) "/raw/" (rev) "/" (path) } { "Download the file" } " for the rest." }
                 }
             }
         }
@@ -363,15 +381,16 @@ pub fn commit(base: &str, c: &CommitInfo, files: &[FileDiff]) -> Markup {
             (files.len()) " files changed, "
             span.add { "+" (adds) } " " span.del { "-" (dels) }
         }
+        @if files.len() > MAX_DIFF_FILES { p.muted.small { "Showing the first " (MAX_DIFF_FILES) " of " (files.len()) " changed files." } }
         nav.card.filelist {
-            @for (i, f) in files.iter().enumerate() {
+            @for (i, f) in files.iter().take(MAX_DIFF_FILES).enumerate() {
                 a href={ "#f" (i) } {
                     span class={ "st st-" (f.status) } { (f.status) } (f.path)
                     span.grow {} span.add { "+" (f.adds) } span.del { "-" (f.dels) }
                 }
             }
         }
-        @for (i, f) in files.iter().enumerate() {
+        @for (i, f) in files.iter().take(MAX_DIFF_FILES).enumerate() {
             div.card.flush.diff id={ "f" (i) } {
                 div.card-head {
                     span class={ "st st-" (f.status) } { (f.status) }
@@ -382,7 +401,7 @@ pub fn commit(base: &str, c: &CommitInfo, files: &[FileDiff]) -> Markup {
                     p.pad.muted { "Binary or large file not shown." }
                 } @else {
                     table.code {
-                        @for l in &f.lines {
+                        @for l in f.lines.iter().take(MAX_DIFF_LINES) {
                             @match l {
                                 Line::Hunk(h) => tr.hunk { td.ln {} td.ln {} td.src { (h) } },
                                 Line::Ctx(a, b, t) => tr { td.ln { (a) } td.ln { (b) } td.src { " " (t) } },
@@ -391,6 +410,7 @@ pub fn commit(base: &str, c: &CommitInfo, files: &[FileDiff]) -> Markup {
                             }
                         }
                     }
+                    @if f.lines.len() > MAX_DIFF_LINES { p.pad.muted.small { "Diff truncated at " (MAX_DIFF_LINES) " lines; see the commit or clone for the rest." } }
                 }
             }
         }
@@ -816,6 +836,87 @@ pub fn org_settings(org: &Owner, members: &[Member], repo_count: i64, msg: Optio
                     }
                 }
             }
+        }
+    }
+}
+
+pub fn totp_login(user: &str, err: Option<&str>) -> Markup {
+    html! {
+        div.narrow {
+            h1.page-title { "two-factor" }
+            p.muted { "Signed in as " strong { (user) } ". Enter the 6-digit code from your authenticator app." }
+            (flash(err))
+            form.card.form method="post" action="/login/totp" {
+                label { "code" input name="code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" required autofocus; }
+                button.btn.primary { "verify" }
+            }
+        }
+    }
+}
+
+pub fn totp_settings(user: &str, secret: Option<&str>, enabled: bool, msg: Option<&str>) -> Markup {
+    html! {
+        h1.page-title { "settings" }
+        nav.tabs {
+            a.active[false] href="/settings/keys" { "ssh keys" }
+            a.active[false] href="/settings/tokens" { "access tokens" }
+            a.active[false] href="/settings/password" { "password" }
+            a.active[true] href="/settings/2fa" { "two-factor" }
+        }
+        div.stack.mt.narrow-left {
+            @if let Some(m) = msg { div.card.notice { (m) } }
+            @if enabled {
+                div.card {
+                    p { strong { "Two-factor is on." } " Logins require a code from your authenticator app." }
+                }
+                form.card.form method="post" action="/settings/2fa/disable" {
+                    label { "code (to turn it off)" input name="code" inputmode="numeric" maxlength="7" required; }
+                    button.btn.danger { "turn off two-factor" }
+                }
+            } @else if let Some(s) = secret {
+                div.card {
+                    p { "1. In your authenticator app, add an account and enter this secret:" }
+                    pre { (s) }
+                    p.muted.small { "or open " code { (crate::totp::otpauth_url(user, s, "loom")) } }
+                    p { "2. Enter the 6-digit code it shows:" }
+                }
+                form.card.form method="post" action="/settings/2fa/enable" {
+                    input type="hidden" name="secret" value=(s);
+                    label { "code" input name="code" inputmode="numeric" maxlength="7" required autofocus; }
+                    button.btn.primary { "turn on two-factor" }
+                }
+            } @else {
+                p.muted { "Two-factor is off." }
+            }
+        }
+    }
+}
+
+pub fn blame(base: &str, rev: &str, path: &str, lines: &[crate::git::BlameLine], total: usize) -> Markup {
+    html! {
+        div.card.flush {
+            div.card-head {
+                span { (path) }
+                span.muted { (total) " lines" }
+                span.grow {}
+                a href={ (base) "/blob/" (rev) "/" (path) } { "view file" }
+            }
+            table.code.blame {
+                @for (i, l) in lines.iter().enumerate() {
+                    @let prev = i.checked_sub(1).and_then(|p| lines.get(p)).map(|p| p.sha.as_str());
+                    tr {
+                        @if prev != Some(l.sha.as_str()) {
+                            td.gutter title={ (l.author) " · " (ago(l.time)) } {
+                                a.sha href={ (base) "/commit/" (l.sha) } { (&l.sha[..8]) }
+                                span.author { (l.author) }
+                            }
+                        } @else { td.gutter.cont {} }
+                        td.ln { (i + 1) }
+                        td.src { (l.text) }
+                    }
+                }
+            }
+            @if total > lines.len() { p.pad.muted { "Blame shown for the first " (lines.len()) " of " (total) " lines." } }
         }
     }
 }

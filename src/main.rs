@@ -6,14 +6,18 @@ mod events;
 mod git;
 mod githttp;
 mod gitops;
+mod highlight;
+mod mirrors;
 mod hooks;
 mod issues_db;
 mod issues_web;
 mod pulls_db;
 mod pulls_web;
+mod releases;
 mod refs;
 mod social_db;
 mod social_web;
+mod totp;
 mod ssh;
 mod ui;
 mod ui_issues;
@@ -111,12 +115,14 @@ fn main() {
         tokio::spawn(trim_heap_periodically());
 
         tokio::spawn(events::run_deliveries(app.clone()));
+        tokio::spawn(mirrors::run(app.clone()));
 
         let router = web::router(app);
         let shutdown = async {
             let _ = tokio::signal::ctrl_c().await;
         };
-        if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(shutdown).await {
+        let service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        if let Err(e) = axum::serve(listener, service).with_graceful_shutdown(shutdown).await {
             eprintln!("serve: {e}");
         }
     });

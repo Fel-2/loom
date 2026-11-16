@@ -23,8 +23,16 @@ pub struct App {
     pub secure_cookies: bool,
     /// Path of the loom binary, for git hooks to call back into.
     pub bin: PathBuf,
-    /// Failed password attempts per lowercased user name: (count, window start).
+    /// Caps concurrent streaming git processes (clones/pushes), which are the
+    /// ones that can eat memory in bulk.
+    pub git_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Failed password attempts: per (client ip, user) and per ip.
     failures: Mutex<HashMap<String, (u32, i64)>>,
+}
+
+/// LOOM_MAX_GIT (default 8): concurrent git upload/receive-pack processes.
+fn max_git() -> usize {
+    std::env::var("LOOM_MAX_GIT").ok().and_then(|v| v.parse().ok()).filter(|n: &usize| (1..=1024).contains(n)).unwrap_or(8)
 }
 
 /// The binary's path. After an in-place upgrade Linux reports the running
@@ -39,11 +47,14 @@ fn own_binary() -> PathBuf {
 
 pub enum Login {
     Ok(User),
+    /// Password was right but the account needs a TOTP code.
+    NeedsTotp(User),
     Bad,
     Throttled,
 }
 
 const MAX_FAILURES: u32 = 5;
+const MAX_IP_FAILURES: u32 = 30;
 const FAILURE_WINDOW: i64 = 15 * 60;
 
 impl App {
@@ -77,6 +88,7 @@ impl App {
             ssh_addr,
             ssh_host,
             bin: own_binary(),
+            git_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(max_git())),
             failures: Mutex::new(HashMap::new()),
         })
     }
@@ -85,33 +97,52 @@ impl App {
         crate::events::Bus { db: &self.db, url: &self.url }
     }
 
-    /// Password login with per-user throttling. Slow (argon2): run off the async thread.
-    pub fn login(&self, name: &str, password: &str) -> Login {
-        let key = name.to_ascii_lowercase();
-        let now = db::now();
-        {
-            let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-            if f.len() > 4096 {
-                f.retain(|_, (_, t)| now - *t < FAILURE_WINDOW);
-            }
-            if let Some((n, t)) = f.get(&key) {
-                if *n >= MAX_FAILURES && now - t < FAILURE_WINDOW {
-                    return Login::Throttled;
-                }
-            }
+    /// Throttled state for a counter key: seconds until allowed again, if blocked.
+    fn blocked(&self, key: &str, max: u32, now: i64) -> Option<i64> {
+        let f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        f.get(key).and_then(|(n, t)| (*n >= max && now - t < FAILURE_WINDOW).then(|| FAILURE_WINDOW - (now - t)))
+    }
+
+    fn fail(&self, key: &str, now: i64) {
+        let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        if f.len() > 8192 {
+            f.retain(|_, (_, t)| now - *t < FAILURE_WINDOW);
         }
-        match self.db.check_password(name, password) {
+        let e = f.entry(key.to_owned()).or_insert((0, now));
+        if now - e.1 >= FAILURE_WINDOW {
+            *e = (0, now);
+        }
+        e.0 += 1;
+    }
+
+    fn clear(&self, key: &str) {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    /// Password login, throttled per (ip, user) and per ip. Throttling by ip
+    /// as well means an attacker elsewhere can't lock the real user out.
+    /// Slow (argon2): run off the async thread.
+    pub fn login(&self, name: &str, password: &str, ip: &str) -> Login {
+        let now = db::now();
+        let user_key = format!("u:{ip}:{}", name.to_ascii_lowercase());
+        let ip_key = format!("i:{ip}");
+        if self.blocked(&user_key, MAX_FAILURES, now).is_some() || self.blocked(&ip_key, MAX_IP_FAILURES, now).is_some() {
+            return Login::Throttled;
+        }
+        let (name, password) = (name.to_owned(), password.to_owned());
+        match self.db.check_password(&name, &password) {
             Ok(Some(u)) => {
-                self.failures.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
-                Login::Ok(u)
+                self.clear(&user_key);
+                let (secret, enabled) = self.db.totp(u.id).unwrap_or_default();
+                if enabled && !secret.is_empty() {
+                    Login::NeedsTotp(u)
+                } else {
+                    Login::Ok(u)
+                }
             }
             _ => {
-                let mut f = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-                let e = f.entry(key).or_insert((0, now));
-                if now - e.1 >= FAILURE_WINDOW {
-                    *e = (0, now);
-                }
-                e.0 += 1;
+                self.fail(&user_key, now);
+                self.fail(&ip_key, now);
                 Login::Bad
             }
         }
@@ -274,8 +305,9 @@ impl App {
         let name = name.strip_suffix(".git").unwrap_or(name);
         let repo = self.db.repo(owner, name).ok()??;
         let mut access = self.db.access(user, &repo).ok()?;
-        // Archived repos are read-only for everyone (admins can unarchive).
-        if repo.archived && need == db::Access::Write {
+        // Archived and mirrored repos are read-only for everyone (admins can
+        // unarchive; mirrors are updated by loom itself).
+        if (repo.archived || repo.mirror) && need == db::Access::Write {
             access = access.min(db::Access::Read);
         }
         (access >= need).then_some((repo, access))

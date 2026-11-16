@@ -194,6 +194,9 @@ impl server::Handler for Conn {
         if let Some(p) = &self.git_protocol {
             cmd.env("GIT_PROTOCOL", p);
         }
+        let Ok(permit) = self.app.git_slots.clone().acquire_owned().await else {
+            return Err(russh::Error::Disconnect);
+        };
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -230,6 +233,7 @@ impl server::Handler for Conn {
             };
             tokio::join!(err_task, out_task);
             let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(1);
+            drop(permit);
             if code == 0 && svc == "receive-pack" {
                 let _ = tokio::task::spawn_blocking(move || git::fix_head(&dir)).await;
             }

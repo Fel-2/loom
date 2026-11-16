@@ -315,6 +315,40 @@ END;
 INSERT INTO comments_fts(comments_fts) VALUES ('rebuild');
 ";
 
+/// v6: releases + assets, pull mirrors, TOTP two-factor, pending sessions.
+const SCHEMA_V6: &str = "
+ALTER TABLE users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE repos ADD COLUMN mirror INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE releases (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created INTEGER NOT NULL
+);
+CREATE INDEX releases_repo ON releases(repo_id, id DESC);
+CREATE TABLE release_assets (
+    id INTEGER PRIMARY KEY,
+    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    downloads INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL
+);
+CREATE TABLE mirrors (
+    repo_id INTEGER PRIMARY KEY REFERENCES repos(id) ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    interval_hours INTEGER NOT NULL DEFAULT 6,
+    last_run INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT ''
+);
+";
+
 pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
     ("bug", "#d73a4a", "Something is broken"),
     ("enhancement", "#84b6eb", "New feature or request"),
@@ -379,6 +413,8 @@ pub struct Repo {
     pub private: bool,
     pub archived: bool,
     pub fork_of: Option<i64>,
+    /// Pull mirror: looms fetches refs from `mirrors.url`; pushes are refused.
+    pub mirror: bool,
 }
 
 pub struct Collaborator {
@@ -482,11 +518,12 @@ fn repo_row(r: &rusqlite::Row<'_>) -> Result<Repo> {
         private: r.get(4)?,
         archived: r.get(5)?,
         fork_of: r.get(6)?,
+        mirror: r.get(7)?,
     })
 }
 
 const USER_COLS: &str = "id, name, email, is_admin";
-const REPO_COLS: &str = "id, owner, name, description, private, archived, fork_of";
+const REPO_COLS: &str = "id, owner, name, description, private, archived, fork_of, mirror";
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -510,6 +547,9 @@ impl Db {
         }
         if v < 5 {
             c.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
+        }
+        if v < 6 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
         }
         Ok(Db(Mutex::new(c)))
     }
@@ -573,25 +613,110 @@ impl Db {
         }
     }
 
+    /// Replace the TOTP secret and enabled flag.
+    pub fn set_totp(&self, user_id: i64, secret: &str, enabled: bool) -> Result<()> {
+        self.c().execute("UPDATE users SET totp_secret = ?1, totp_enabled = ?2 WHERE id = ?3", params![secret, enabled, user_id])?;
+        Ok(())
+    }
+
+    /// (secret, enabled) for a user.
+    pub fn totp(&self, user_id: i64) -> Result<(String, bool)> {
+        self.c().query_row("SELECT totp_secret, totp_enabled FROM users WHERE id = ?1", [user_id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+    }
+
+    // ---- mirrors ----
+
+    pub fn mirror(&self, repo_id: i64) -> Result<Option<(String, i64, i64, String, String)>> {
+        use rusqlite::OptionalExtension;
+        self.c()
+            .query_row("SELECT url, interval_hours, last_run, status, message FROM mirrors WHERE repo_id = ?1", [repo_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()
+    }
+
+    pub fn set_mirror_config(&self, repo_id: i64, url: &str, hours: i64) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO mirrors (repo_id, url, interval_hours) VALUES (?1, ?2, ?3)
+             ON CONFLICT (repo_id) DO UPDATE SET url = excluded.url, interval_hours = excluded.interval_hours",
+            params![repo_id, url, hours],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_mirror(&self, repo_id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM mirrors WHERE repo_id = ?1", [repo_id])?;
+        Ok(())
+    }
+
+    pub fn mark_mirror_run(&self, repo_id: i64, status: &str, message: &str) -> Result<()> {
+        self.c().execute(
+            "UPDATE mirrors SET last_run = ?1, status = ?2, message = ?3 WHERE repo_id = ?4",
+            params![now(), status, message, repo_id],
+        )?;
+        Ok(())
+    }
+
+    /// (repo_id, url, interval_hours) for mirrors whose interval has passed.
+    pub fn due_mirrors(&self) -> Result<Vec<(i64, String, i64)>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT repo_id, url, interval_hours FROM mirrors
+             WHERE last_run + interval_hours * 3600 <= ?1 OR (last_run = 0 AND status = '')",
+        )?;
+        st.query_map([now()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+    }
+
     // ---- sessions ----
 
     /// Returns the raw cookie value; only its hash is stored.
     pub fn create_session(&self, user_id: i64) -> Result<String> {
+        self.create_session_inner(user_id, false, SESSION_DAYS * 86400)
+    }
+
+    /// A session that exists only to carry a login through the 2FA step.
+    pub fn create_pending_session(&self, user_id: i64) -> Result<String> {
+        self.create_session_inner(user_id, true, 300)
+    }
+
+    fn create_session_inner(&self, user_id: i64, pending: bool, ttl: i64) -> Result<String> {
         let raw = random_hex(32);
         let c = self.c();
         c.execute("DELETE FROM sessions WHERE expires < ?1", [now()])?;
         c.execute(
-            "INSERT INTO sessions (hash, user_id, expires) VALUES (?1, ?2, ?3)",
-            params![sha256_hex(&raw), user_id, now() + SESSION_DAYS * 86400],
+            "INSERT INTO sessions (hash, user_id, expires, pending) VALUES (?1, ?2, ?3, ?4)",
+            params![sha256_hex(&raw), user_id, now() + ttl, pending],
         )?;
         Ok(raw)
+    }
+
+    /// Turn a pending session into a real one.
+    pub fn confirm_session(&self, raw: &str) -> Result<bool> {
+        Ok(self.c().execute(
+            "UPDATE sessions SET pending = 0, expires = ?1 WHERE hash = ?2 AND pending = 1",
+            params![now() + SESSION_DAYS * 86400, sha256_hex(raw)],
+        )? > 0)
+    }
+
+    /// User behind a pending session (2FA step only).
+    pub fn pending_session_user(&self, raw: &str) -> Result<Option<User>> {
+        self.c()
+            .query_row(
+                "SELECT u.id, u.name, u.email, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
+                 WHERE s.hash = ?1 AND s.expires > ?2 AND s.pending = 1",
+                params![sha256_hex(raw), now()],
+                user_row,
+            )
+            .optional()
     }
 
     pub fn session_user(&self, raw: &str) -> Result<Option<User>> {
         self.c()
             .query_row(
                 "SELECT u.id, u.name, u.email, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
-                 WHERE s.hash = ?1 AND s.expires > ?2",
+                 WHERE s.hash = ?1 AND s.expires > ?2 AND s.pending = 0",
                 params![sha256_hex(raw), now()],
                 user_row,
             )
@@ -780,6 +905,11 @@ impl Db {
 
     pub fn move_repo(&self, id: i64, owner: &str, name: &str) -> Result<()> {
         self.c().execute("UPDATE repos SET owner = ?1, name = ?2 WHERE id = ?3", params![owner, name, id])?;
+        Ok(())
+    }
+
+    pub fn set_mirror(&self, id: i64, mirror: bool) -> Result<()> {
+        self.c().execute("UPDATE repos SET mirror = ?1 WHERE id = ?2", params![mirror, id])?;
         Ok(())
     }
 

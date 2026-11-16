@@ -11,6 +11,7 @@ usage: loom [serve]
        loom user passwd <name> [--password-stdin]
        loom user del <name>
        loom user list
+       loom user 2fa-off <name>   (recover an account that lost its authenticator)
        loom key add <user> <pubkey-file|-> [title]
        loom repo create <owner>/<name> [--private] [--desc <text>]
        loom repo adopt        register bare repos already on disk (public)
@@ -79,6 +80,7 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
         ("user", Some("passwd")) => user_passwd(&app, rest),
         ("user", Some("del")) => user_del(&app, rest),
         ("user", Some("list")) => user_list(&app),
+        ("user", Some("2fa-off")) => user_2fa_off(&app, rest),
         ("key", Some("add")) => key_add(&app, rest),
         ("repo", Some("create")) => repo_create(&app, rest),
         ("repo", Some("adopt")) => repo_adopt(&app),
@@ -185,6 +187,14 @@ fn user_del(app: &App, args: &[String]) -> Result<(), String> {
         return Err("no such user".into());
     }
     println!("deleted user {name} (their repositories stay on disk)");
+    Ok(())
+}
+
+fn user_2fa_off(app: &App, args: &[String]) -> Result<(), String> {
+    let name = args.first().ok_or(USAGE)?;
+    let u = app.db.user_by_name(name).map_err(|e| e.to_string())?.ok_or("no such user")?;
+    app.db.set_totp(u.id, "", false).map_err(|e| e.to_string())?;
+    println!("two-factor disabled for {name}; their sessions were NOT signed out");
     Ok(())
 }
 
