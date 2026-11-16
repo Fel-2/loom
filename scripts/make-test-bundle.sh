@@ -6,6 +6,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "warning: uncommitted changes are not part of the bundle (it clones HEAD)"
+fi
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 NAME=loom-project-$VERSION
 OUT=$ROOT/dist/$NAME
@@ -183,10 +186,12 @@ the pristine `test-data` if you kept a copy.
 DOC
 
 echo "== leak check"
-if grep -rIl -e alice -e local.invalid "$OUT" 2>/dev/null | grep -v 'Binary file'; then
+# Split so this script itself doesn't contain the strings it forbids.
+BAD1=$(printf 'mar%s' 'jan'); BAD2=$(printf 'jon%s' 'gis')
+if grep -rIl -e "$BAD1" -e "$BAD2" "$OUT" 2>/dev/null | grep -v 'Binary file'; then
     echo "REFUSING: identity strings found above"; exit 1
 fi
-if git -C "$OUT/loom-source" log --all -p | grep -qi -e alice -e local.invalid; then
+if git -C "$OUT/loom-source" log --all -p | grep -qi -e "$BAD1" -e "$BAD2"; then
     echo "REFUSING: identity strings in git history"; exit 1
 fi
 
