@@ -28,6 +28,8 @@ Full numbers and method: [`bench/results/SUMMARY.md`](bench/results/SUMMARY.md).
   viewer may see the target; `Fixes #12` closes on merge or on push to the
   default branch. PRs: fork heads, revisions per push with `git range-diff`,
   reviews, no-JS inline comments, merge/squash/rebase, "merged by push".
+- **Git LFS**: batch API, uploads verified by SHA-256, `git-lfs-authenticate`
+  over SSH so LFS works with SSH remotes too; storage under `data/lfs/`.
 - **Releases**: notes per tag, uploaded assets with download counts, source
   tarballs (`git archive`).
 - **Integrations**: signed webhooks with retries and a delivery log, commit
@@ -64,6 +66,25 @@ printf 'a-long-password' | ./target/release/loom user add you --admin --password
 
 Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 
+## Deploy
+
+- **Container**: `docker compose up -d` (Dockerfile is two-stage; the runtime
+  image carries git). First admin:
+  `docker compose exec loom loom user add you --admin --password-stdin`.
+- **systemd**: `deploy/loom.service` (hardened: loom can only write
+  `LOOM_DATA`). Put a reverse proxy in front for TLS and set `LOOM_URL` to the
+  public URL; add `LOOM_TRUST_PROXY=1` if the proxy sets `X-Forwarded-For`.
+- **Health / metrics**: `GET /healthz` (JSON, 503 when the DB or storage is
+  broken) and `GET /metrics` (Prometheus text: uptime, request counters,
+  in-flight requests, free git slots, RSS, threads, repo count).
+- **Backups**: `loom backup /backups --repos` writes a consistent SQLite
+  snapshot (`VACUUM INTO`) plus a copy of the repositories (reflink when the
+  filesystem supports it). Run it from cron; restore is "stop loom, put the
+  files back".
+- **Upgrades**: replace the binary and restart. Git hooks call the binary by
+  path, resolved at startup, so an in-place upgrade doesn't break pushes
+  (`loom repo maintain` rebuilds commit-graphs if you changed git versions).
+
 ## Tests
 
 `tests/*.sh` run against a live instance (default `127.0.0.1:3917`, seeded with
@@ -79,6 +100,7 @@ tests/m4.sh      # issues, labels, milestones, references (65)
 tests/m5.sh      # pull requests, merges, revisions (71)
 tests/m6.sh      # webhooks, statuses, API, notifications, search (61)
 tests/m7.sh      # highlighting, caps, blame, releases, 2FA, mirrors (48)
+tests/m8.sh      # LFS (real git-lfs), healthz, metrics, backup, version
 cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, ...)
 ```
 
@@ -86,9 +108,9 @@ cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, ...)
 
 ## Not implemented
 
-Git LFS (needs its own protocol endpoints and storage path) and per-file "last
-commit" badges in tree views (Forgejo spends ~1 s per large directory on those;
-loom's tree view is 1.3 ms).
+Per-file "last commit" badges in tree views — Forgejo spends ~1 s per large
+directory on those, which is exactly the latency loom avoids. (Git LFS is
+supported.)
 
 ## License
 

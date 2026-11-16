@@ -65,7 +65,7 @@ fn not_found() -> Response {
 }
 
 /// HTTP Basic: username + password, or any username + personal access token.
-async fn basic_user(app: &Arc<App>, headers: &HeaderMap) -> Option<User> {
+pub(crate) async fn basic_user(app: &Arc<App>, headers: &HeaderMap) -> Option<User> {
     let v = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let b64 = v.strip_prefix("Basic ").or_else(|| v.strip_prefix("basic "))?;
     let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;

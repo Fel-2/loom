@@ -134,3 +134,12 @@ processes (`LOOM_MAX_GIT`). tests/m7.sh: 48 checks.
 
 Still out: Git LFS, per-file last-commit badges (cost ~1 s per large directory,
 which is exactly the latency loom avoids).
+
+## 9. LFS and operations
+
+Git LFS (batch API, SHA-256-verified uploads, authenticated downloads,
+`git-lfs-authenticate` over SSH with short-lived signed tokens; storage under
+`data/lfs/`). Deployment: two-stage Dockerfile (runtime carries git), compose
+file, hardened systemd unit; `/healthz` and `/metrics`; `loom backup <dir>
+[--repos]` (SQLite VACUUM INTO + reflink copy) and `loom version`; startup
+fails fast if git is missing. tests/m8.sh: 21 checks.

@@ -11,6 +11,8 @@ mod mirrors;
 mod hooks;
 mod issues_db;
 mod issues_web;
+mod lfs;
+mod ops;
 mod pulls_db;
 mod pulls_web;
 mod releases;

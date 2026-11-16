@@ -576,6 +576,25 @@ impl Db {
             .optional()
     }
 
+    /// Consistent snapshot of the database file (SQLite VACUUM INTO).
+    pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        self.c().execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
+    pub fn schema_version(&self) -> i64 {
+        self.c().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0)
+    }
+
+    pub fn user_by_id(&self, id: i64) -> Result<Option<User>> {
+        self.c()
+            .query_row(&format!("SELECT {USER_COLS} FROM users WHERE id = ?1 AND is_org = 0"), [id], user_row)
+            .optional()
+    }
+
     pub fn users(&self) -> Result<Vec<User>> {
         let c = self.c();
         let mut st = c.prepare(&format!("SELECT {USER_COLS} FROM users WHERE is_org = 0 ORDER BY name"))?;
@@ -1105,6 +1124,10 @@ impl Db {
             "SELECT o.name FROM org_members m JOIN users o ON o.id = m.org_id WHERE m.user_id = ?1 ORDER BY o.name",
         )?;
         st.query_map([user_id], |r| r.get(0))?.collect()
+    }
+
+    pub fn repo_count_total(&self) -> Result<i64> {
+        self.c().query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
     }
 
     pub fn repo_count(&self, owner: &str) -> Result<i64> {

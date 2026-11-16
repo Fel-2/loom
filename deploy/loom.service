@@ -1,0 +1,37 @@
+# /etc/systemd/system/loom.service — adjust paths, then:
+#   systemctl daemon-reload && systemctl enable --now loom
+[Unit]
+Description=loom git forge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=loom
+Group=loom
+Environment=LOOM_DATA=/var/lib/loom
+Environment=LOOM_ADDR=127.0.0.1:3000
+Environment=LOOM_SSH_ADDR=0.0.0.0:2222
+# Public URL: what clone links and webhook payloads use.
+Environment=LOOM_URL=https://git.example.com
+Environment=LOOM_SSH_HOST=git.example.com:2222
+# Behind a reverse proxy (nginx/caddy) that sets X-Forwarded-For:
+#Environment=LOOM_TRUST_PROXY=1
+ExecStart=/usr/local/bin/loom serve
+Restart=on-failure
+RestartSec=2
+
+# Hardening: loom only needs its data directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/loom
+# Port 2222 needs no privilege; drop port 80/443 if a proxy terminates TLS.
+
+[Install]
+WantedBy=multi-user.target

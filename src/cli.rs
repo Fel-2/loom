@@ -16,6 +16,8 @@ usage: loom [serve]
        loom repo create <owner>/<name> [--private] [--desc <text>]
        loom repo adopt        register bare repos already on disk (public)
        loom repo list
+       loom version
+       loom backup <dir> [--repos]
        loom repo maintain     write commit-graphs for all repos (speeds up history)
        loom org create <name> <admin-user>
        loom org add <org> <user> [read|write|admin]
@@ -58,6 +60,14 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if a.is_empty() || a[0] == "serve" {
         return None;
+    }
+    if a[0] == "version" {
+        let git = std::process::Command::new("git").arg("--version").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
+        println!("loom {} ({git})", env!("CARGO_PKG_VERSION"));
+        return Some(Ok(()));
+    }
+    if a[0] == "backup" {
+        return Some(backup(a.get(1).copied(), &args[2..]));
     }
     if a[0] == "hook" {
         return Some(match a.get(1).copied() {
@@ -324,5 +334,32 @@ fn org_add(app: &App, args: &[String]) -> Result<(), String> {
     let u = app.db.user_by_name(user).map_err(|e| e.to_string())?.ok_or("no such user")?;
     app.db.set_member(o.id, u.id, role).map_err(|e| e.to_string())?;
     println!("{} is now {:?} in {}", u.name, role, o.name);
+    Ok(())
+}
+
+fn backup(dir: Option<&str>, args: &[String]) -> Result<(), String> {
+    let dir = dir.ok_or("usage: loom backup <dir> [--repos]")?;
+    let data = std::path::PathBuf::from(std::env::var_os("LOOM_DATA").unwrap_or_else(|| "./data".into()));
+    let dest = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dest).map_err(|e| format!("{dir}: {e}"))?;
+    let db = db::Db::open(&data.join("loom.db")).map_err(|e| e.to_string())?;
+    let stamp = db::now();
+    let file = dest.join(format!("loom-{stamp}.db"));
+    db.backup_to(&file).map_err(|e| e.to_string())?;
+    println!("database -> {}", file.display());
+    if args.iter().any(|a| a == "--repos") {
+        let out = std::process::Command::new("cp")
+            .args(["-a", "--reflink=auto"])
+            .arg(data.join("repos"))
+            .arg(dest.join(format!("repos-{stamp}")))
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
+        println!("repositories -> {}", dest.join(format!("repos-{stamp}")).display());
+    } else {
+        println!("(metadata only; add --repos to copy the repositories too)");
+    }
     Ok(())
 }

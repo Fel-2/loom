@@ -1206,7 +1206,10 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::api::routes())
         .merge(crate::social_web::routes())
         .merge(crate::releases::routes())
+        .merge(crate::lfs::routes())
+        .merge(crate::ops::routes())
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
+        .layer(middleware::from_fn_with_state(app.clone(), crate::ops::count))
         .with_state(app)
 }

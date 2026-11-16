@@ -1,0 +1,16 @@
+# docker compose up -d
+# The first admin:  docker compose exec loom loom user add you --admin --password-stdin
+services:
+  loom:
+    build: .
+    container_name: loom
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+      - "2222:2222"
+    volumes:
+      - ./data:/data
+    environment:
+      # What users see in clone URLs and webhook payloads.
+      LOOM_URL: http://localhost:3000
+      LOOM_SSH_HOST: localhost:2222

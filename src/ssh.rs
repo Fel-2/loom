@@ -171,6 +171,42 @@ impl server::Handler for Conn {
             }
         };
         let cmd = String::from_utf8_lossy(data).into_owned();
+        // git-lfs asks over SSH for a URL + header to use against the HTTP
+        // LFS endpoint. We hand out a short-lived signed token.
+        if let Some(rest) = cmd.trim().strip_prefix("git-lfs-authenticate ") {
+            let mut it = rest.split_whitespace();
+            let path = it.next().unwrap_or("").trim_matches(|c| c == '\'' || c == '"').trim_matches('/');
+            let op = it.next().unwrap_or("download");
+            let (owner, name) = path.split_once('/').unwrap_or(("", ""));
+            let need = if op == "upload" { Access::Write } else { Access::Read };
+            session.channel_success(channel)?;
+            let body = match (self.user.as_ref(), self.app.authorize(self.user.as_ref(), owner, name, need)) {
+                (Some(u), Some((repo, _))) => serde_json::json!({
+                    "href": format!("{}/{}/{}.git/info/lfs", self.app.url.trim_end_matches('/'), repo.owner, repo.name),
+                    "header": { "Authorization": format!("Bearer {}", self.app.lfs_token(u.id)) },
+                    "expires_in": 3600,
+                })
+                .to_string(),
+                _ => {
+                    let handle = session.handle();
+                    tokio::spawn(async move {
+                        let _ = handle.extended_data(channel, 1, b"loom: repository not found or access denied\n".to_vec()).await;
+                        let _ = handle.exit_status_request(channel, 1).await;
+                        let _ = handle.eof(channel).await;
+                        let _ = handle.close(channel).await;
+                    });
+                    return Ok(());
+                }
+            };
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let _ = handle.data(channel, format!("{body}\n").into_bytes()).await;
+                let _ = handle.exit_status_request(channel, 0).await;
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+            });
+            return Ok(());
+        }
         let Some((svc, owner, name)) = parse_command(&cmd) else {
             session.channel_success(channel)?;
             tokio::spawn(fail("only git-upload-pack and git-receive-pack are supported".into()));

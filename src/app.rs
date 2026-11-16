@@ -26,6 +26,11 @@ pub struct App {
     /// Caps concurrent streaming git processes (clones/pushes), which are the
     /// ones that can eat memory in bulk.
     pub git_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    /// HMAC key for short-lived LFS tokens (data/secret, 0600).
+    pub secret: Vec<u8>,
+    pub started: i64,
+    /// Ops counters (cheap atomics; surfaced at /metrics).
+    pub stats: Stats,
     /// Failed password attempts: per (client ip, user) and per ip.
     failures: Mutex<HashMap<String, (u32, i64)>>,
 }
@@ -42,6 +47,72 @@ fn own_binary() -> PathBuf {
     match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
         Some(p) => PathBuf::from(p),
         None => exe,
+    }
+}
+
+#[derive(Default)]
+pub struct Stats {
+    pub requests: std::sync::atomic::AtomicU64,
+    pub errors_4xx: std::sync::atomic::AtomicU64,
+    pub errors_5xx: std::sync::atomic::AtomicU64,
+    pub in_flight: std::sync::atomic::AtomicI64,
+}
+
+/// Load or create the server secret.
+fn server_secret(data: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = data.join("secret");
+    if let Ok(v) = std::fs::read(&path) {
+        if v.len() >= 32 {
+            return Ok(v);
+        }
+    }
+    let mut buf = vec![0u8; 32];
+    getrandom::fill(&mut buf).map_err(|e| e.to_string())?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    std::io::Write::write_all(&mut f, &buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+impl App {
+    /// `v1.<uid>.<expiry>.<hmac>` — what `git-lfs-authenticate` hands out.
+    pub fn lfs_token(&self, user_id: i64) -> String {
+        let exp = crate::db::now() + 3600;
+        let payload = format!("v1.{user_id}.{exp}");
+        format!("{payload}.{}", self.sign(&payload))
+    }
+
+    pub fn sign(&self, payload: &str) -> String {
+        use hmac::{Hmac, KeyInit, Mac};
+        let mut mac = <Hmac<sha2::Sha256> as KeyInit>::new_from_slice(&self.secret).expect("hmac accepts any length");
+        mac.update(payload.as_bytes());
+        mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    pub fn verify_lfs_token(&self, token: &str) -> Option<i64> {
+        let (payload, sig) = token.rsplit_once('.')?;
+        let mut parts = payload.split('.');
+        if parts.next()? != "v1" {
+            return None;
+        }
+        let uid: i64 = parts.next()?.parse().ok()?;
+        let exp: i64 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || exp < crate::db::now() {
+            return None;
+        }
+        // Constant-time compare of the hex signature.
+        let want = self.sign(payload);
+        if want.len() != sig.len() {
+            return None;
+        }
+        let ok = want.bytes().zip(sig.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+        ok.then_some(uid)
     }
 }
 
@@ -64,6 +135,10 @@ impl App {
         // Absolute: git hooks run with the repo as cwd.
         let data = data.canonicalize().map_err(|e| format!("{}: {e}", data.display()))?;
         let repos = data.join("repos");
+        let git = std::process::Command::new("git").arg("--version").output().map_err(|e| format!("git not found in PATH ({e}); loom needs git for clones, pushes and merges"))?;
+        if !git.status.success() {
+            return Err("`git --version` failed; loom needs a working git".into());
+        }
         let db = Db::open(&data.join("loom.db")).map_err(|e| format!("open db: {e}"))?;
         let http_addr = std::env::var("LOOM_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".into());
         let url = std::env::var("LOOM_URL")
@@ -78,6 +153,7 @@ impl App {
         let ssh_host = std::env::var("LOOM_SSH_HOST").unwrap_or_else(|_| {
             ssh_addr.clone().unwrap_or_default()
         });
+        let secret = server_secret(&data)?;
         Ok(App {
             secure_cookies: url.starts_with("https://"),
             data,
@@ -89,6 +165,9 @@ impl App {
             ssh_host,
             bin: own_binary(),
             git_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(max_git())),
+            secret,
+            started: db::now(),
+            stats: Stats::default(),
             failures: Mutex::new(HashMap::new()),
         })
     }
