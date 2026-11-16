@@ -1,0 +1,18 @@
+[package]
+name = "loadgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone benchmark client for loom vs. other forges. Not part of loom.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+[profile.release]
+opt-level = 3

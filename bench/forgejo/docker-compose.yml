@@ -1,0 +1,20 @@
+# Forgejo for side-by-side benchmarks with loom. Same version as production
+# (15.0.6), SQLite (loom's DB too, and Forgejo's leanest setup), defaults
+# otherwise, no memory limit. Data lives outside the repo.
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15.0.6
+    container_name: forgejo-bench
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__server__ROOT_URL=http://127.0.0.1:3918/
+      - FORGEJO__server__DOMAIN=127.0.0.1
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+      - FORGEJO__log__LEVEL=Warn
+    volumes:
+      - ${FORGEJO_BENCH_DATA:-~/.cache/loom-bench/forgejo-data}:/data
+    ports:
+      - "127.0.0.1:3918:3000"

@@ -1,0 +1,108 @@
+loom vs forgejo — 2026-11-16T12:18:16+01:00
+host: 20 cores, 15 GB RAM; git/git @ 7fb6055e678f
+loom: 574ce40 feat: integrations — webhooks, statuses, API, notifications, search; binary 13.3 MB
+forgejo: 15.0.6+gitea-1.22.0 sqlite3, defaults
+
+################ loom (pid 466161)
+## idle (20 s)
+IDLE rss_kb min=16632 avg=16632 max=16632 tree_max_kb=16632 threads=1
+## uncontended latency (1 client, 10 reps)
+page                      p50 ms    p95 ms    p99 ms    max ms   errs     bytes
+repo-home                   1.82      2.92      2.92      2.92      0     62915
+tree-dir                    1.28      1.98      1.98      1.98      0     37827
+blob-diff.c                 3.55      5.67      5.67      5.67      0    906449
+raw-Makefile                1.79      2.39      2.39      2.39      0    131698
+log                         2.28      3.25      3.25      3.25      0     18245
+log-page-50                22.14     26.62     26.62     26.62      0     18825
+commit                      5.55      7.23      7.23      7.23      0      9382
+branches                   18.74     20.16     20.16     20.16      0    274498
+issues                      0.73      0.97      0.97      0.97      0     10071
+issue                       1.00      1.16      1.16      1.16      0      4810
+pr                         24.86     27.65     27.65     27.65      0      3226
+pr-files                   12.61     19.61     19.61     19.61      0      4195
+small-repo                  1.05      1.30      1.30      1.30      0     17949
+user                        0.30      0.46      0.46      0.46      0      8092
+api-repo                    0.26      0.75      0.75      0.75      0       247
+api-issues                  0.29      0.52      0.52      0.52      0      8885
+TOTAL requests=160 wall=0.99s rps=161 peak_rss_kb=47240 peak_tree_rss_kb=47240 max_children=0
+## load (32 clients, 40 reps per page)
+page                      p50 ms    p95 ms    p99 ms    max ms   errs     bytes
+repo-home                  79.30     84.22     87.50     87.50      0     62915
+tree-dir                   80.40     84.82     87.16     87.16      0     37827
+blob-diff.c                82.98     88.07     90.01     90.01      0    906449
+raw-Makefile               78.16     81.30     85.04     85.04      0    131698
+log                        77.26     82.07     86.22     86.22      0     18245
+log-page-50                89.05     95.88    102.08    102.08      0     18825
+commit                     67.10     71.47     76.17     76.17      0      9382
+branches                   84.53     88.89     93.03     93.03      0    274498
+issues                      0.71      3.42      9.44      9.44      0     10071
+issue                       1.42      3.90     11.38     11.38      0      4810
+pr                         92.52     96.51    103.68    103.68      0      3226
+pr-files                   77.52     85.59     87.31     87.31      0      4195
+small-repo                 77.90     84.08     87.57     87.57      0     17949
+user                        0.81      3.63     12.60     12.60      0      8092
+api-repo                    0.76      2.18     13.40     13.40      0       247
+api-issues                  0.96      2.33     13.62     13.62      0      8885
+TOTAL requests=640 wall=1.13s rps=564 peak_rss_kb=87520 peak_tree_rss_kb=87520 max_children=0
+## after load: settle 70 s, then idle (10 s)
+IDLE rss_kb min=16880 avg=16880 max=16880 tree_max_kb=16880 threads=1
+## concurrent clones over HTTP
+clones ok=10/10 (8x ytm-tui + 2x git/git) time=14.04s peak_tree_rss_kb=1154440
+## after clones: settle 70 s, then idle (10 s)
+IDLE rss_kb min=16756 avg=16756 max=16756 tree_max_kb=16756 threads=1
+
+################ forgejo (pid 517396)
+## idle (20 s)
+IDLE rss_kb min=239404 avg=239404 max=239404 tree_max_kb=239404 threads=43
+## uncontended latency (1 client, 10 reps)
+page                      p50 ms    p95 ms    p99 ms    max ms   errs     bytes
+repo-home                  72.18     93.75     93.75     93.75      0    787359
+tree-dir                 1039.32   1049.66   1049.66   1049.66      0    437772
+blob-diff.c               333.84    352.24    352.24    352.24      0   3042200
+raw-Makefile               13.58     20.88     20.88     20.88      0    131698
+log                        37.80     56.69     56.69     56.69      0    220296
+log-page-50                50.04     72.70     72.70     72.70      0    212078
+commit                     62.52     83.52     83.52     83.52      0    108494
+branches                  203.77    238.25    238.25    238.25      0    327054
+issues                     14.57     20.59     20.59     20.59      0     81767
+issue                      23.71     34.76     34.76     34.76      0    198517
+pr                         68.92     94.90     94.90     94.90      0    133926
+pr-files                   67.42    117.98    117.98    117.98      0     63967
+small-repo                 29.64     68.28     68.28     68.28      0     66239
+user                        4.81      7.55      7.55      7.55      0     25989
+api-repo                    1.48      1.88      1.88      1.88      0      2293
+api-issues                 10.33     21.52     21.52     21.52      0     26513
+TOTAL requests=160 wall=20.39s rps=8 peak_rss_kb=288684 peak_tree_rss_kb=461860 max_children=3
+## load (32 clients, 40 reps per page)
+page                      p50 ms    p95 ms    p99 ms    max ms   errs     bytes
+repo-home                 493.08    826.46   1085.44   1085.44      0    787360
+tree-dir                 1327.11   1583.50   1733.29   1733.29      0    437772
+blob-diff.c              1080.80   1669.93   2015.48   2015.48      0   3042200
+raw-Makefile              115.96    297.74    371.63    371.63      0    131698
+log                       474.25   1203.97   1300.54   1300.54      0    220297
+log-page-50               642.07    997.76   1227.73   1227.73      0    212079
+commit                    233.79    666.39    745.54    745.54      0    108495
+branches                 1004.30   1621.47   1965.66   1965.66      0    327054
+issues                    273.93    785.43   1190.03   1190.03      0     81768
+issue                     496.47   1173.06   1411.24   1411.24      0    198519
+pr                        637.02   1105.87   1382.61   1382.61      0    133927
+pr-files                  465.27    816.86   1112.81   1112.81      0     63966
+small-repo                275.93    571.34    853.95    853.95      0     66240
+user                      180.42    424.45    571.67    571.67      0     25991
+api-repo                   33.67    354.57    620.84    620.84      0      2293
+api-issues               1319.33   2389.93   3072.92   3072.92      0     26513
+TOTAL requests=640 wall=12.96s rps=49 peak_rss_kb=353520 peak_tree_rss_kb=988644 max_children=58
+## after load: settle 70 s, then idle (10 s)
+IDLE rss_kb min=304592 avg=304592 max=304592 tree_max_kb=304592 threads=104
+## concurrent clones over HTTP
+clones ok=10/10 (8x ytm-tui + 2x git/git) time=14.56s peak_tree_rss_kb=1154440
+## after clones: settle 70 s, then idle (10 s)
+IDLE rss_kb min=273800 avg=273800 max=273800 tree_max_kb=273800 threads=104
+
+## forgejo container total (all processes incl. s6, sshd)
+forgejo-bench mem=303.5MiB / 15.35GiB pids=108
+## clones only — 2026-11-16T12:25:54+01:00
+loom:    clones ok=10/10 (8x ytm-tui + 2x git/git) time=14.47s peak_tree_rss_kb=1157244
+forgejo: clones ok=10/10 (8x ytm-tui + 2x git/git) time=16.67s peak_tree_rss_kb=1457740
+
+## NOTE: the first forgejo clone line above is invalid (sampler race); corrected re-run appended above.
