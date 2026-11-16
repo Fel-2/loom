@@ -21,8 +21,20 @@ pub struct App {
     pub ssh_host: String,
     /// Send cookies with `Secure` (set when `url` is https).
     pub secure_cookies: bool,
+    /// Path of the loom binary, for git hooks to call back into.
+    pub bin: PathBuf,
     /// Failed password attempts per lowercased user name: (count, window start).
     failures: Mutex<HashMap<String, (u32, i64)>>,
+}
+
+/// The binary's path. After an in-place upgrade Linux reports the running
+/// image as "<path> (deleted)"; hooks must run whatever now lives at <path>.
+fn own_binary() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("loom"));
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(p) => PathBuf::from(p),
+        None => exe,
+    }
 }
 
 pub enum Login {
@@ -64,6 +76,7 @@ impl App {
             http_addr,
             ssh_addr,
             ssh_host,
+            bin: own_binary(),
             failures: Mutex::new(HashMap::new()),
         })
     }
@@ -232,9 +245,7 @@ impl App {
         cmd.env("LOOM_DATA", &self.data);
         cmd.env("LOOM_REPO_ID", repo.id.to_string());
         cmd.env("LOOM_USER", user.map_or("", |u| u.name.as_str()));
-        if let Ok(exe) = std::env::current_exe() {
-            cmd.env("LOOM_BIN", exe);
-        }
+        cmd.env("LOOM_BIN", &self.bin);
     }
 
     /// Resolve `owner/name` for `user`, returning `None` unless they have at least `need`.
