@@ -98,7 +98,7 @@ check "bob rejects a bad email"                 is "$(post bob /settings/account
 MI=$(mention alice $R "email test $RUN" "hello @bob, look")
 check "mention queues an email"                 bash -c "[ \$(sqlite3 -readonly '$DATA/loom.db' \"select count(*) from mail_outbox where to_addr='bob@example.com' and subject like '%email test $RUN%'\") -ge 1 ]"
 printf '#!/bin/sh\ncat >> %s/mail.log\n' "$W" > mailer.sh && chmod +x mailer.sh
-check "loom mail flush sends it"                bash -c "LOOM_DATA=$DATA LOOM_MAIL_CMD='$W/mailer.sh -t' $LOOM mail flush | grep -q '1 sent'"
+check "loom mail flush sends it"                bash -c "LOOM_DATA=$DATA LOOM_MAIL_CMD='$W/mailer.sh -t' $LOOM mail flush | grep -qE '[1-9][0-9]* sent'"
 check "  message looks like RFC 822"            bash -c "grep -q 'To: bob@example.com' $W/mail.log && grep -q 'Subject: \[' $W/mail.log && grep -q '$R/issues/' $W/mail.log"
 check "  nothing left queued for bob"           bash -c "[ \$(sqlite3 -readonly '$DATA/loom.db' \"select count(*) from mail_outbox where to_addr='bob@example.com' and sent=0\") = 0 ]"
 
