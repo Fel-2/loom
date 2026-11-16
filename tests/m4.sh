@@ -6,6 +6,7 @@ set -u
 B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
 SSH_PORT=${LOOM_TEST_SSH_PORT:-2917}
 KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
+DATA=${LOOM_DATA:-$HOME/Projects/loom/data}
 W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m4.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 cd "$W" || exit 1
@@ -37,7 +38,7 @@ echo "== create & view"
 check "default labels on migrated repo"          has "$(page anon /$R/labels)" "good first issue"
 I1=$(new_issue bob $R "bob bug $RUN" "Steps: <script>alert(1)</script> thanks @alice and @nobody-here")
 check "bob opens an issue"                       test -n "$I1"
-I2=$(new_issue alice $R "alice task $RUN" "Related to #$I1 and $(git --git-dir=$HOME/Projects/loom/data/repos/$R.git rev-parse --short=10 HEAD)")
+I2=$(new_issue alice $R "alice task $RUN" "Related to #$I1 and $(git --git-dir=$DATA/repos/$R.git rev-parse --short=10 HEAD)")
 check "numbers are sequential"                   is "$I2" "$((I1+1))"
 P=$(page anon /$R/issues/$I1)
 check "anon can read the issue"                  has "$P" "bob bug $RUN"
