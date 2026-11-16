@@ -59,6 +59,12 @@ fn git_threads() -> usize {
 fn main() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     limit_malloc_arenas();
+    // Die quietly on a closed pipe like other Unix tools, instead of the
+    // panic `println!` raises when stdout goes away (e.g. `loom lfs gc | head`).
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(result) = cli::run(&args) {

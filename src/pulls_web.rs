@@ -414,6 +414,17 @@ fn compare_page(app: &Arc<App>, ctx: &Ctx, q: &CompareQ, title: &str, body_text:
     let sel_head = q.head.clone().unwrap_or_default();
     let base = ctx.base();
     let form = uip::compare_form(&uip::CompareForm { base: &base, branches: &branches, heads: &heads, sel_base: &sel_base, sel_head: &sel_head });
+    // Prefill the PR description from the repository's template.
+    let default_body = if body_text.is_empty() {
+        crate::git::open(&ctx.dir)
+            .ok()
+            .and_then(|r| crate::git::head_commit(&r).map(|h| (r, h)))
+            .and_then(|(r, h)| crate::git::templates(&r, h, "pulls").into_iter().next().map(|(_, b)| b))
+            .unwrap_or_default()
+    } else {
+        body_text.to_owned()
+    };
+    let body_text = default_body.as_str();
 
     let result = if sel_head.is_empty() {
         html! { p.muted { "Pick a branch (or a fork's branch) to compare against " code { (sel_base) } "." } }

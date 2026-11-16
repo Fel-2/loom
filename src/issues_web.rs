@@ -15,9 +15,10 @@ use crate::app::App;
 use crate::db::{Access, Repo, User};
 use crate::issues_db::{self, Filter, Issue};
 use crate::refs::Token;
+use crate::git;
 use crate::ui::{self, RefLink, Resolve};
 use crate::ui_issues::{self as uii, Item};
-use crate::web::{see_other, Authed, Ctx, Err, Res, St, Viewer};
+use crate::web::{blocking, see_other, Authed, Ctx, Err, Res, St, Viewer};
 
 const MAX_TITLE: usize = 256;
 const MAX_BODY: usize = 65536;
@@ -264,13 +265,46 @@ fn list_impl(app: &Arc<App>, v: Option<User>, owner: &str, name: &str, q: ListQ,
     Ok(ctx.page(kind, body))
 }
 
-async fn new_page(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>) -> Res {
+async fn new_page(
+    State(app): St,
+    Authed(u): Authed,
+    Path((owner, name)): Path<(String, String)>,
+    Query(q): Query<TemplateQ>,
+) -> Res {
     let ctx = Ctx::load(&app, Some(u), &owner, &name)?;
     if ctx.repo.archived {
         return Err(Err::NotFound);
     }
-    let body = html! { (ctx.header(ui::Tab::Issues, "HEAD")) (uii::new_issue(&ctx.base(), "", "", None)) };
-    Ok(ctx.page("new issue", body))
+    blocking(move || {
+        let repo = ctx.open()?;
+        let tpls = git::head_commit(&repo).map(|h| git::templates(&repo, h, "issues")).unwrap_or_default();
+        // A template is code from the default branch: shown as text, never executed.
+        let body = q
+            .template
+            .as_deref()
+            .and_then(|t| tpls.iter().find(|(n, _)| n == t).map(|(_, b)| b.clone()))
+            .unwrap_or_default();
+        let picker = (!tpls.is_empty()).then(|| {
+            html! {
+                div.issue-bar {
+                    span.muted.small { "templates:" }
+                    @for (n, _) in &tpls { a.filter-chip href={ (ctx.base()) "/issues/new?template=" (crate::web::urlencode(n)) } { (n) } }
+                }
+            }
+        });
+        let page = html! {
+            (ctx.header(ui::Tab::Issues, "HEAD"))
+            @if let Some(p) = picker { (p) }
+            (uii::new_issue(&ctx.base(), "", &body, None))
+        };
+        Ok(ctx.page("new issue", page))
+    })
+    .await
+}
+
+#[derive(Deserialize, Default)]
+pub struct TemplateQ {
+    template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -586,7 +620,7 @@ fn check_label(f: &LabelF) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn is_unique_violation(e: &crate::db::Error) -> bool {
+pub fn is_unique_violation(e: &crate::db::Error) -> bool {
     matches!(e, crate::db::Error::SqliteFailure(x, _) if x.code == rusqlite::ErrorCode::ConstraintViolation)
 }
 

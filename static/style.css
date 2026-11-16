@@ -291,3 +291,9 @@ ul.assets li { display: flex; gap: .6rem; align-items: center; padding: .45rem 1
 ul.assets li a { font-weight: 600; }
 .release-links { font-size: .85rem; }
 details.edit.card summary { cursor: pointer; }
+
+/* avatars, graph, last-commit badges, templates */
+svg.avatar { border-radius: 50%; vertical-align: -4px; margin-right: .35rem; }
+header.top a svg.avatar { margin-right: .15rem; }
+span.last-commit { float: right; color: var(--muted); font-family: var(--mono); font-size: .75rem; }
+pre.graph { padding: 1rem 1.25rem; font-size: .8rem; line-height: 1.45; overflow-x: auto; color: var(--muted); }

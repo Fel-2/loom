@@ -255,3 +255,117 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/lfs/objects/batch", post(batch))
         .route("/{owner}/{name}/lfs/objects/{oid}", get(download).put(upload).post(verify))
 }
+
+/// Objects referenced by LFS pointers in any commit reachable from any ref.
+fn referenced_oids(dir: &std::path::Path) -> std::collections::HashSet<String> {
+    use std::io::Write;
+    let mut keep = std::collections::HashSet::new();
+    // Feed stdin from a thread: writing a multi-megabyte object list while
+    // the child is also writing its answer deadlocks on full pipe buffers.
+    let run = |args: &[&str], stdin: Option<&[u8]>| -> Option<Vec<u8>> {
+        let mut c = std::process::Command::new("git");
+        c.arg("--git-dir").arg(dir).args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).env_remove("GIT_DIR");
+        let mut child = c.spawn().ok()?;
+        let mut pipe = child.stdin.take()?;
+        let data = stdin.map(|d| d.to_vec());
+        let writer = std::thread::spawn(move || {
+            let _ = pipe.write_all(&data.unwrap_or_default());
+        });
+        let out = child.wait_with_output().ok()?;
+        let _ = writer.join();
+        out.status.success().then_some(out.stdout)
+    };
+    let Some(objects) = run(&["rev-list", "--objects", "--all"], None) else { return keep };
+    let shas: Vec<&[u8]> = objects.split(|b| *b == b'\n').filter_map(|l| l.split(|b| *b == b' ').next().filter(|s| s.len() == 40)).collect();
+    if shas.is_empty() {
+        return keep;
+    }
+    // Sizes first: LFS pointers are tiny, so only small blobs are worth reading.
+    let mut list = Vec::with_capacity(shas.len() * 41);
+    for s in &shas {
+        list.extend_from_slice(s);
+        list.push(b'\n');
+    }
+    let Some(meta) = run(&["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], Some(&list)) else { return keep };
+    let mut small = Vec::new();
+    for line in meta.split(|b| *b == b'\n') {
+        let f: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
+        if f.len() == 3 && f[1] == b"blob" {
+            if let Ok(size) = std::str::from_utf8(f[2]).unwrap_or("").parse::<u64>() {
+                if size < 4096 {
+                    small.extend_from_slice(f[0]);
+                    small.push(b'\n');
+                }
+            }
+        }
+    }
+    if small.is_empty() {
+        return keep;
+    }
+    let Some(contents) = run(&["cat-file", "--batch"], Some(&small)) else { return keep };
+    let text = String::from_utf8_lossy(&contents);
+    for line in text.lines() {
+        if let Some(oid) = line.trim_end().strip_prefix("oid sha256:") {
+            if valid_oid(oid) {
+                keep.insert(oid.to_owned());
+            }
+        }
+    }
+    keep
+}
+
+/// Delete LFS objects no longer referenced by any ref. Returns (removed, bytes).
+pub fn gc(app: &App, dry_run: bool, only: Option<&str>) -> Result<(usize, u64), String> {
+    let admin = crate::db::User { id: 0, name: String::new(), email: String::new(), is_admin: true, unread: 0 };
+    let repos = app.db.visible_repos(Some(&admin), None).map_err(|e| e.to_string())?;
+    let (mut removed, mut bytes) = (0, 0u64);
+    // Objects of repositories that no longer exist (their ids may be reused).
+    let live: std::collections::HashSet<String> = repos.iter().map(|r| r.id.to_string()).collect();
+    if let Ok(entries) = std::fs::read_dir(app.data.join("lfs")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.bytes().all(|b| b.is_ascii_digit()) && !live.contains(&name) {
+                if dry_run {
+                    println!("would remove objects of deleted repo id {name}");
+                } else {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        }
+    }
+    for repo in repos {
+        let full = format!("{}/{}", repo.owner, repo.name);
+        if only.is_some_and(|o| o != full) {
+            continue;
+        }
+        eprintln!("scanning {full}");
+        let keep = referenced_oids(&app.repo_dir(&repo));
+        let root = app.data.join("lfs").join(repo.id.to_string());
+        if !root.is_dir() {
+            continue;
+        }
+        let mut stack = vec![root.clone()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if valid_oid(name) && !keep.contains(name) {
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        if dry_run {
+                            println!("would remove {full} {name} ({size} bytes)");
+                            removed += 1;
+                            bytes += size;
+                        } else if std::fs::remove_file(&p).is_ok() {
+                            removed += 1;
+                            bytes += size;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok((removed, bytes))
+}

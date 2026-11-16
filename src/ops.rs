@@ -79,3 +79,52 @@ pub async fn count(State(app): State<Arc<App>>, req: axum::extract::Request, nex
     };
     res
 }
+
+/// Token bucket per (ip, class). Burst = 2 seconds' worth.
+fn take(app: &App, ip: &str, write: bool) -> bool {
+    let rate = if write { app.rate_write } else { app.rate_read };
+    if rate <= 0.0 {
+        return true;
+    }
+    let burst = (rate * 2.0).max(1.0);
+    let key = format!("{}{ip}", if write { "w:" } else { "r:" });
+    let now = std::time::Instant::now();
+    let mut b = app.buckets.lock().unwrap_or_else(|e| e.into_inner());
+    if b.len() > 50_000 {
+        b.retain(|_, v| now.duration_since(v.last).as_secs() < 60);
+    }
+    let e = b.entry(key).or_insert(crate::app::Bucket { tokens: burst, last: now });
+    let elapsed = now.duration_since(e.last).as_secs_f64();
+    e.tokens = (e.tokens + elapsed * rate).min(burst);
+    e.last = now;
+    if e.tokens >= 1.0 {
+        e.tokens -= 1.0;
+        true
+    } else {
+        false
+    }
+}
+
+pub async fn rate_limit(State(app): State<Arc<App>>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path();
+    // Monitoring and immutable assets are never throttled.
+    if path == "/healthz" || path == "/api/healthz" || path == "/metrics" || path.starts_with("/static/") || path.starts_with("/avatar/") {
+        return next.run(req).await;
+    }
+    let write = !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
+    let ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    if !take(&app, &ip, write) {
+        let mut res = (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests; slow down.\n",
+        )
+            .into_response();
+        res.headers_mut().insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
+        return res;
+    }
+    next.run(req).await
+}

@@ -23,7 +23,7 @@ pub fn page(title: &str, viewer: Option<&User>, body: Markup) -> Markup {
                     @if let Some(u) = viewer {
                         a.bell href="/notifications" title="notifications" { "🔔" @if u.unread > 0 { span.unread { (u.unread) } } }
                         a.btn href="/new" { "+ new" }
-                        a href="/settings/keys" { (u.name) }
+                        a href={ "/" (u.name) } { (avatar(&u.name, 18)) } a href="/settings/keys" { (u.name) }
                         form.inline method="post" action="/logout" { button.link { "sign out" } }
                     } @else {
                         a href="/login" { "sign in" }
@@ -183,7 +183,13 @@ pub fn crumbs(base: &str, rev: &str, path: &str) -> Markup {
     }
 }
 
-pub fn tree(base: &str, rev: &str, path: &str, entries: &[Entry]) -> Markup {
+pub struct LastCommit {
+    pub sha: String,
+    pub author: String,
+    pub when: i64,
+}
+
+pub fn tree(base: &str, rev: &str, path: &str, entries: &[Entry], last: &std::collections::HashMap<String, LastCommit>) -> Markup {
     let prefix = if path.is_empty() { String::new() } else { format!("{path}/") };
     html! {
         div.card.flush {
@@ -197,9 +203,9 @@ pub fn tree(base: &str, rev: &str, path: &str, entries: &[Entry]) -> Markup {
                         @if e.is_submodule {
                             span { span.icon { "◇" } (e.name) span.muted { " submodule" } }
                         } @else if e.is_dir {
-                            a.dir href={ (base) "/tree/" (rev) "/" (prefix) (e.name) } { span.icon { "▸" } (e.name) "/" }
+                            a.dir href={ (base) "/tree/" (rev) "/" (prefix) (e.name) } { span.icon { "▸" } (e.name) "/" @if let Some(l) = last.get(&e.name) { span.last-commit { (l.sha) " · " (l.author) " · " (ago(l.when)) } } }
                         } @else {
-                            a href={ (base) "/blob/" (rev) "/" (prefix) (e.name) } { span.icon { "·" } (e.name) }
+                            a href={ (base) "/blob/" (rev) "/" (prefix) (e.name) } { span.icon { "·" } (e.name) @if let Some(l) = last.get(&e.name) { span.last-commit { (l.sha) " · " (l.author) " · " (ago(l.when)) } } }
                         }
                     }
                 }
@@ -486,6 +492,8 @@ pub enum SettingsTab {
     Keys,
     Tokens,
     Password,
+    TwoFactor,
+    Account,
 }
 
 fn settings_nav(tab: SettingsTab) -> Markup {
@@ -494,6 +502,8 @@ fn settings_nav(tab: SettingsTab) -> Markup {
             a.active[tab == SettingsTab::Keys] href="/settings/keys" { "ssh keys" }
             a.active[tab == SettingsTab::Tokens] href="/settings/tokens" { "access tokens" }
             a.active[tab == SettingsTab::Password] href="/settings/password" { "password" }
+            a.active[tab == SettingsTab::TwoFactor] href="/settings/2fa" { "two-factor" }
+            a.active[tab == SettingsTab::Account] href="/settings/account" { "account" }
         }
     }
 }
@@ -657,12 +667,21 @@ fn role_name(a: Access) -> &'static str {
     }
 }
 
+pub struct TeamRow {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub members: usize,
+    pub repos: usize,
+}
+
 pub struct SettingsData<'a> {
     pub branches: &'a [String],
     pub default_branch: Option<&'a str>,
     pub collaborators: &'a [Collaborator],
     pub protections: &'a [Protection],
     pub owners: &'a [String],
+    pub teams: &'a [(String, Access)],
 }
 
 pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: Option<&str>) -> Markup {
@@ -684,6 +703,7 @@ pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: 
                 }
                 label.check { input type="checkbox" name="private" value="1" checked[repo.private]; "private" }
                 label.check { input type="checkbox" name="archived" value="1" checked[repo.archived]; "archived (read-only, pushes refused)" }
+                label.check { input type="checkbox" name="show_last_commit" value="1" checked[repo.show_last_commit]; "show last commit per file in tree views (slower on large directories)" }
                 button.btn.primary { "save" }
             }
 
@@ -742,6 +762,12 @@ pub fn repo_settings(repo: &Repo, d: &SettingsData<'_>, msg: Option<&str>, err: 
                 }
             }
 
+            section.card.flush {
+                div.card-head { "teams with access" span.muted { (d.teams.len()) } }
+                @if d.teams.is_empty() { p.pad.muted { "No teams. Manage teams in the organization's settings." } }
+                ul.rows { @for (t, role) in d.teams { li { strong { (t) } span.badge { (role_name(*role)) } } } }
+            }
+
             section.card.danger-zone {
                 h3 { "danger zone" }
                 form.row-form method="post" action={ (base) "/rename" } {
@@ -791,7 +817,7 @@ pub fn owner_page(owner: &Owner, repos: &[Repo], orgs: &[String], members: &[Mem
     }
 }
 
-pub fn org_settings(org: &Owner, members: &[Member], repo_count: i64, msg: Option<&str>, err: Option<&str>) -> Markup {
+pub fn org_settings(org: &Owner, members: &[Member], repo_count: i64, teams: &[TeamRow], msg: Option<&str>, err: Option<&str>) -> Markup {
     let base = format!("/{}/settings", org.name);
     html! {
         h1.page-title { a href={ "/" (org.name) } { (org.name) } " · settings" }
@@ -824,6 +850,26 @@ pub fn org_settings(org: &Owner, members: &[Member], repo_count: i64, msg: Optio
                 }
                 p.pad.muted.small { "read: see private repos · write: push and create repos · admin: manage org and all its repos" }
             }
+            section.card.flush {
+                div.card-head { "teams" span.muted { (teams.len()) } }
+                @if teams.is_empty() { p.pad.muted { "No teams yet. Teams get read/write/admin on selected repositories." } }
+                ul.rows {
+                    @for t in teams {
+                        li {
+                            a href={ (base) "/teams/" (t.id) } { strong { (t.name) } }
+                            span.muted.small { (t.description) }
+                            span.grow {}
+                            span.muted.small { (t.members) " members · " (t.repos) " repos" }
+                        }
+                    }
+                }
+                form.row-form method="post" action={ (base) "/teams" } {
+                    input name="name" placeholder="team name" required maxlength="50" pattern="[A-Za-z0-9 ._-]+";
+                    input name="description" placeholder="description" maxlength="200";
+                    button.btn { "create team" }
+                }
+            }
+
             section.card.danger-zone {
                 h3 { "danger zone" }
                 @if repo_count > 0 {
@@ -857,12 +903,7 @@ pub fn totp_login(user: &str, err: Option<&str>) -> Markup {
 pub fn totp_settings(user: &str, secret: Option<&str>, enabled: bool, msg: Option<&str>) -> Markup {
     html! {
         h1.page-title { "settings" }
-        nav.tabs {
-            a.active[false] href="/settings/keys" { "ssh keys" }
-            a.active[false] href="/settings/tokens" { "access tokens" }
-            a.active[false] href="/settings/password" { "password" }
-            a.active[true] href="/settings/2fa" { "two-factor" }
-        }
+        (settings_nav(SettingsTab::TwoFactor))
         div.stack.mt.narrow-left {
             @if let Some(m) = msg { div.card.notice { (m) } }
             @if enabled {
@@ -917,6 +958,111 @@ pub fn blame(base: &str, rev: &str, path: &str, lines: &[crate::git::BlameLine],
                 }
             }
             @if total > lines.len() { p.pad.muted { "Blame shown for the first " (lines.len()) " of " (total) " lines." } }
+        }
+    }
+}
+
+/// Deterministic identicon from a name (no external avatar service).
+pub fn avatar(name: &str, size: u32) -> Markup {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(name.as_bytes());
+    let hue = h[0] as u32 * 360 / 256;
+    let bg = format!("hsl({hue} 55% 45%)");
+    let fg = format!("hsl({hue} 65% 85%)");
+    let mut cells = String::new();
+    for y in 0..5 {
+        for x in 0..3 {
+            let on = h[1 + y * 3 + x] & 1 == 1;
+            if on {
+                for xx in [x, 4 - x] {
+                    cells.push_str(&format!("<rect x=\"{xx}\" y=\"{y}\" width=\"1\" height=\"1\"/>"));
+                }
+            }
+        }
+    }
+    PreEscaped(format!(
+        "<svg class=\"avatar\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 5 5\" aria-hidden=\"true\">         <rect width=\"5\" height=\"5\" fill=\"{bg}\"/><g fill=\"{fg}\">{cells}</g></svg>"
+    ))
+}
+
+/// Avatar + name link.
+pub fn user_link(name: &str, size: u32) -> Markup {
+    html! { a.who href={ "/" (name) } { (avatar(name, size)) (name) } }
+}
+
+pub fn account(email: &str, enabled: bool, msg: Option<&str>, err: Option<&str>) -> Markup {
+    html! {
+        h1.page-title { "settings" }
+        (settings_nav(SettingsTab::Account))
+        div.stack.mt.narrow-left {
+            (flash_box(err, msg))
+            form.card.form method="post" action="/settings/account" {
+                label { "email" input name="email" type="email" value=(email) maxlength="200" placeholder="you@example.com"; }
+                label.check { input type="checkbox" name="notify" value="1" checked[enabled]; "email me about mentions, assignments and my threads" }
+                p.muted.small { "Sending needs LOOM_MAIL_CMD on the server (e.g. " code { "/usr/sbin/sendmail -t" } ")." }
+                button.btn.primary { "save" }
+            }
+        }
+    }
+}
+
+pub fn team_page(org: &Owner, team: &TeamRow, members: &[Member], repos: &[(String, Access)], all_repos: &[String], msg: Option<&str>, err: Option<&str>) -> Markup {
+    let base = format!("/{}/settings/teams/{}", org.name, team.id);
+    html! {
+        h1.page-title { a href={ "/" (org.name) "/settings" } { (org.name) } " · " (team.name) }
+        div.stack.narrow-left {
+            (flash_box(err, msg))
+            section.card.flush {
+                div.card-head { "members" span.muted { (members.len()) } }
+                ul.rows {
+                    @for m in members {
+                        li {
+                            a href={ "/" (m.name) } { (m.name) }
+                            span.badge { (role_name(m.access)) }
+                            span.grow {}
+                            form.inline method="post" action={ (base) "/members/remove" } {
+                                input type="hidden" name="name" value=(m.name);
+                                button.link.danger { "remove" }
+                            }
+                        }
+                    }
+                }
+                form.row-form method="post" action={ (base) "/members" } {
+                    input name="name" placeholder="user name" required;
+                    select name="role" { option value="read" { "read" } option value="write" selected { "write" } option value="admin" { "admin" } }
+                    button.btn { "add / update" }
+                }
+            }
+            section.card.flush {
+                div.card-head { "repository access" span.muted { (repos.len()) } }
+                @if repos.is_empty() { p.pad.muted { "No repositories granted." } }
+                ul.rows {
+                    @for (r, role) in repos {
+                        li {
+                            a href={ "/" (r) } { (r) }
+                            span.badge { (role_name(*role)) }
+                            span.grow {}
+                            form.inline method="post" action={ (base) "/repos/remove" } {
+                                input type="hidden" name="repo" value=(r);
+                                button.link.danger { "revoke" }
+                            }
+                        }
+                    }
+                }
+                form.row-form method="post" action={ (base) "/repos" } {
+                    select name="repo" { @for r in all_repos { option value=(r) { (r) } } }
+                    select name="role" { option value="read" { "read" } option value="write" selected { "write" } option value="admin" { "admin" } }
+                    button.btn { "grant" }
+                }
+            }
+            section.card.danger-zone {
+                h3 { "danger zone" }
+                form.row-form method="post" action={ (base) "/delete" } {
+                    span { "delete team — type " code { (team.name) } " to confirm" }
+                    input name="confirm" required autocomplete="off";
+                    button.btn.danger { "delete team" }
+                }
+            }
         }
     }
 }

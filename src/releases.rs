@@ -31,6 +31,8 @@ pub struct Release {
     pub body: String,
     pub author: Option<String>,
     pub created: i64,
+    pub draft: bool,
+    pub prerelease: bool,
 }
 
 pub struct Asset {
@@ -44,11 +46,20 @@ impl Db {
     pub fn releases(&self, repo_id: i64) -> DbResult<Vec<Release>> {
         let c = self.c();
         let mut st = c.prepare(
-            "SELECT r.id, r.tag, r.title, r.body, u.name, r.created FROM releases r
+            "SELECT r.id, r.tag, r.title, r.body, u.name, r.created, r.draft, r.prerelease FROM releases r
              LEFT JOIN users u ON u.id = r.author_id WHERE r.repo_id = ?1 ORDER BY r.created DESC, r.id DESC",
         )?;
         st.query_map([repo_id], |r| {
-            Ok(Release { id: r.get(0)?, tag: r.get(1)?, title: r.get(2)?, body: r.get(3)?, author: r.get(4)?, created: r.get(5)? })
+            Ok(Release {
+                id: r.get(0)?,
+                tag: r.get(1)?,
+                title: r.get(2)?,
+                body: r.get(3)?,
+                author: r.get(4)?,
+                created: r.get(5)?,
+                draft: r.get(6)?,
+                prerelease: r.get(7)?,
+            })
         })?
         .collect()
     }
@@ -56,25 +67,40 @@ impl Db {
     pub fn release(&self, repo_id: i64, id: i64) -> DbResult<Option<Release>> {
         self.c()
             .query_row(
-                "SELECT r.id, r.tag, r.title, r.body, u.name, r.created FROM releases r
+                "SELECT r.id, r.tag, r.title, r.body, u.name, r.created, r.draft, r.prerelease FROM releases r
                  LEFT JOIN users u ON u.id = r.author_id WHERE r.repo_id = ?1 AND r.id = ?2",
                 params![repo_id, id],
-                |r| Ok(Release { id: r.get(0)?, tag: r.get(1)?, title: r.get(2)?, body: r.get(3)?, author: r.get(4)?, created: r.get(5)? }),
+                |r| {
+                    Ok(Release {
+                        id: r.get(0)?,
+                        tag: r.get(1)?,
+                        title: r.get(2)?,
+                        body: r.get(3)?,
+                        author: r.get(4)?,
+                        created: r.get(5)?,
+                        draft: r.get(6)?,
+                        prerelease: r.get(7)?,
+                    })
+                },
             )
             .optional()
     }
 
-    pub fn create_release(&self, repo_id: i64, tag: &str, title: &str, body: &str, author: i64) -> DbResult<i64> {
+    pub fn create_release(&self, repo_id: i64, tag: &str, title: &str, body: &str, author: i64, draft: bool, prerelease: bool) -> DbResult<i64> {
         let c = self.c();
         c.execute(
-            "INSERT INTO releases (repo_id, tag, title, body, author_id, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![repo_id, tag, title, body, author, now()],
+            "INSERT INTO releases (repo_id, tag, title, body, author_id, created, draft, prerelease)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![repo_id, tag, title, body, author, now(), draft, prerelease],
         )?;
         Ok(c.last_insert_rowid())
     }
 
-    pub fn update_release(&self, repo_id: i64, id: i64, title: &str, body: &str) -> DbResult<()> {
-        self.c().execute("UPDATE releases SET title = ?1, body = ?2 WHERE id = ?3 AND repo_id = ?4", params![title, body, id, repo_id])?;
+    pub fn update_release(&self, repo_id: i64, id: i64, title: &str, body: &str, draft: bool, prerelease: bool) -> DbResult<()> {
+        self.c().execute(
+            "UPDATE releases SET title = ?1, body = ?2, draft = ?3, prerelease = ?4 WHERE id = ?5 AND repo_id = ?6",
+            params![title, body, draft, prerelease, id, repo_id],
+        )?;
         Ok(())
     }
 
@@ -152,6 +178,8 @@ pub fn list_page(ctx: &Ctx, releases: &[(Release, Vec<Asset>)], can_edit: bool) 
                 div.card-head {
                     a href={ (base) "/releases/" (r.id) } { strong { (r.title) } }
                     code.ref-pill { (r.tag) }
+                    @if r.draft { span.badge.warn { "draft" } }
+                    @if r.prerelease { span.badge { "pre-release" } }
                     span.muted.small { @if let Some(a) = &r.author { (a) " · " } (ago(r.created)) }
                 }
                 @if !r.body.is_empty() { div.prose.pad { (crate::ui::markdown(&r.body)) } }
@@ -186,7 +214,9 @@ pub fn new_page(ctx: &Ctx, tags: &[String], tag: &str, title: &str, body: &str, 
                 }
                 label { "title" input name="title" value=(title) required maxlength="256"; }
                 label { "notes (markdown)" textarea.body name="body" rows="10" { (body) } }
-                button.btn.primary { "publish release" }
+                label.check { input type="checkbox" name="draft" value="1"; "draft (hidden from everyone else)" }
+                label.check { input type="checkbox" name="prerelease" value="1"; "pre-release" }
+                button.btn.primary { "save release" }
             }
         }
     }
@@ -240,6 +270,8 @@ pub fn view_page(ctx: &Ctx, r: &Release, assets: &[Asset], can_edit: bool, msg: 
                     form.form method="post" action={ (base) "/releases/" (r.id) "/edit" } {
                         input name="title" value=(r.title) required maxlength="256";
                         textarea.body name="body" rows="8" { (r.body) }
+                        label.check { input type="checkbox" name="draft" value="1" checked[r.draft]; "draft" }
+                        label.check { input type="checkbox" name="prerelease" value="1" checked[r.prerelease]; "pre-release" }
                         button.btn.primary { "save" }
                     }
                 }
@@ -252,12 +284,16 @@ pub fn view_page(ctx: &Ctx, r: &Release, assets: &[Asset], can_edit: bool, msg: 
 
 async fn list(State(app): St, Viewer(v): Viewer, AxPath((owner, name)): AxPath<(String, String)>) -> Res {
     let ctx = Ctx::load(&app, v, &owner, &name)?;
+    let can_edit = ctx.access >= Access::Write && !ctx.repo.archived;
     let mut all = Vec::new();
     for r in app.db.releases(ctx.repo.id)? {
+        if r.draft && !can_edit {
+            continue;
+        }
         let assets = app.db.release_assets(r.id)?;
         all.push((r, assets));
     }
-    let body = html! { (ctx.header(Tab::Releases, "HEAD")) (list_page(&ctx, &all, ctx.access >= Access::Write && !ctx.repo.archived)) };
+    let body = html! { (ctx.header(Tab::Releases, "HEAD")) (list_page(&ctx, &all, can_edit)) };
     Ok(ctx.page("releases", body))
 }
 
@@ -278,6 +314,8 @@ struct NewF {
     tag: String,
     title: String,
     body: String,
+    draft: Option<String>,
+    prerelease: Option<String>,
 }
 
 fn valid_tag(t: &str) -> bool {
@@ -297,24 +335,36 @@ async fn create(State(app): St, Authed(u): Authed, AxPath((owner, name)): AxPath
     if !exists {
         return Ok(fail("There's no such tag in this repository. Push the tag first."));
     }
-    let id = app.db.create_release(ctx.repo.id, &tag, f.title.trim(), &f.body, u.id)?;
+    let id = app.db.create_release(ctx.repo.id, &tag, f.title.trim(), &f.body, u.id, f.draft.is_some(), f.prerelease.is_some())?;
     Ok(see_other(&format!("{}/releases/{id}", ctx.base())))
 }
 
 async fn view(State(app): St, Viewer(v): Viewer, AxPath((owner, name, id)): AxPath<(String, String, i64)>) -> Res {
     let ctx = Ctx::load(&app, v, &owner, &name)?;
+    let can_edit = ctx.access >= Access::Write && !ctx.repo.archived;
     let r = app.db.release(ctx.repo.id, id)?.ok_or(Err::NotFound)?;
+    if r.draft && !can_edit {
+        return Err(Err::NotFound);
+    }
     let assets = app.db.release_assets(id)?;
-    let body = html! { (ctx.header(Tab::Releases, "HEAD")) (view_page(&ctx, &r, &assets, ctx.access >= Access::Write && !ctx.repo.archived, None)) };
+    let body = html! { (ctx.header(Tab::Releases, "HEAD")) (view_page(&ctx, &r, &assets, can_edit, None)) };
     Ok(ctx.page(&r.title, body))
 }
 
-async fn edit(State(app): St, Authed(u): Authed, AxPath((owner, name, id)): AxPath<(String, String, i64)>, axum::Form(f): axum::Form<NewF>) -> Res {
+#[derive(Deserialize)]
+struct EditF {
+    title: String,
+    body: String,
+    draft: Option<String>,
+    prerelease: Option<String>,
+}
+
+async fn edit(State(app): St, Authed(u): Authed, AxPath((owner, name, id)): AxPath<(String, String, i64)>, axum::Form(f): axum::Form<EditF>) -> Res {
     let ctx = admin(&app, u, &owner, &name)?;
     if f.title.trim().is_empty() || f.title.chars().count() > 256 || f.body.len() > MAX_BODY {
         return Ok((StatusCode::BAD_REQUEST, ctx.page("release", html! { (ctx.header(Tab::Releases, "HEAD")) p.flash { "Title or notes too long." } })).into_response());
     }
-    app.db.update_release(ctx.repo.id, id, f.title.trim(), &f.body)?;
+    app.db.update_release(ctx.repo.id, id, f.title.trim(), &f.body, f.draft.is_some(), f.prerelease.is_some())?;
     Ok(see_other(&format!("{}/releases/{id}", ctx.base())))
 }
 

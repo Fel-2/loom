@@ -232,6 +232,21 @@ impl Ctx {
     }
 }
 
+/// Last-commit info per entry, only when the repo opted in.
+fn last_map(ctx: &Ctx, commit: gix::ObjectId, dir: &str, entries: &[git::Entry]) -> std::collections::HashMap<String, ui::LastCommit> {
+    let mut m = std::collections::HashMap::new();
+    if !ctx.repo.show_last_commit || entries.len() > 400 {
+        return m;
+    }
+    let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+    for e in entries {
+        if let Some(l) = git::last_commit(&ctx.dir, &commit.to_string(), &format!("{prefix}{}", e.name)) {
+            m.insert(e.name.clone(), ui::LastCommit { sha: l.sha, author: l.author, when: l.time });
+        }
+    }
+    m
+}
+
 // ---------- browse ----------
 
 async fn index(State(app): St, Viewer(v): Viewer) -> Res {
@@ -272,7 +287,7 @@ async fn overview(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(
                 div.split {
                     div.stack {
                         (ui::crumbs(&base, &rev, ""))
-                        (ui::tree(&base, &rev, "", &entries))
+                        (ui::tree(&base, &rev, "", &entries, &last_map(&ctx, head, "", &entries)))
                         @if let Some((n, c)) = &readme { (ui::readme(n, c)) }
                     }
                     aside.card.flush {
@@ -303,7 +318,7 @@ async fn tree(State(app): St, Viewer(v): Viewer, Path((owner, name, rest)): Path
                 (ctx.header(ui::Tab::Overview, rev))
                 div.stack {
                     (ui::crumbs(&base, rev, path))
-                    (ui::tree(&base, rev, path, &entries))
+                    (ui::tree(&base, rev, path, &entries, &last_map(&ctx, id, path, &entries)))
                     @if let Some((n, c)) = &readme { (ui::readme(n, c)) }
                 }
             };
@@ -394,6 +409,7 @@ async fn log(
                 (ctx.header(ui::Tab::Commits, &rev))
                 @if !path.is_empty() { p.muted { "history of " code { (path) } } }
                 div.card.flush { (ui::commit_rows(&base, &commits[..commits.len().min(PER)])) }
+                nav.pager { span.muted.small { "prefer a graph? " } a href={ (base) "/graph/" (rev) } { "graph view" } }
                 nav.pager {
                     @if page > 0 { a href={ "?" (qp) "page=" (page - 1) } { "← newer" } }
                     @if more { a href={ "?" (qp) "page=" (page + 1) } { "older →" } }
@@ -453,6 +469,29 @@ async fn blame(State(app): St, Viewer(v): Viewer, Path((owner, name, rest)): Pat
     .await
 }
 
+async fn graph(State(app): St, Viewer(v): Viewer, Path((owner, name, rev)): Path<(String, String, String)>) -> Res {
+    let ctx = Ctx::load(&app, v, &owner, &name)?;
+    blocking(move || {
+        let id = git::resolve_commit(&ctx.open()?, &rev)?;
+        let out = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&ctx.dir)
+            .args(["log", "--graph", "--oneline", "--decorate", "-n", "200", &id.to_string()])
+            .env_remove("GIT_DIR")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .map_err(|e| Err::Internal(e.to_string()))?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let body = html! {
+            (ctx.header(ui::Tab::Commits, &rev))
+            div.card.flush { pre.graph { (text) } }
+        };
+        Ok(ctx.page("graph", body))
+    })
+    .await
+}
+
 async fn refs(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(String, String)>) -> Res {
     let ctx = Ctx::load(&app, v, &owner, &name)?;
     blocking(move || {
@@ -467,6 +506,26 @@ async fn refs(State(app): St, Viewer(v): Viewer, Path((owner, name)): Path<(Stri
         Ok(ctx.page("refs", body))
     })
     .await
+}
+
+async fn avatar_route(Path(name): Path<String>, headers: HeaderMap) -> Response {
+    let tag = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut h);
+        format!("\"av-{:x}\"", h.finish())
+    };
+    let hit = headers.get(header::IF_NONE_MATCH).is_some_and(|v| v.as_bytes() == tag.as_bytes());
+    let mut res = if hit {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        ([(header::CONTENT_TYPE, "image/svg+xml")], ui::avatar(&name, 64).into_string()).into_response()
+    };
+    if let Ok(v) = HeaderValue::from_str(&tag) {
+        res.headers_mut().insert(header::ETAG, v);
+    }
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=86400"));
+    res
 }
 
 async fn css(headers: HeaderMap) -> Response {
@@ -750,6 +809,31 @@ async fn password_change(State(app): St, Authed(u): Authed, ConnectInfo(peer): C
     Ok(res)
 }
 
+async fn account_page(State(app): St, Authed(u): Authed) -> Res {
+    let (email, on) = app.db.notify_prefs(u.id)?;
+    Ok(ui::page("account", Some(&u), ui::account(&email, on, None, None)).into_response())
+}
+
+#[derive(Deserialize)]
+struct AccountF {
+    email: String,
+    notify: Option<String>,
+}
+
+async fn account_save(State(app): St, Authed(u): Authed, Form(f): Form<AccountF>) -> Res {
+    let email = f.email.trim();
+    let enabled = f.notify.is_some() && !email.is_empty();
+    let bad = (!email.is_empty() && (email.len() > 200 || !email.contains('@') || email.contains(char::is_whitespace)))
+        .then_some("That doesn't look like an email address.");
+    if let Some(e) = bad {
+        return Ok((StatusCode::BAD_REQUEST, ui::page("account", Some(&u), ui::account(email, enabled, None, Some(e)))).into_response());
+    }
+    app.db.set_notify_email(u.id, email, enabled)?;
+    let mut me = u.clone();
+    me.email = email.to_owned();
+    Ok(ui::page("account", Some(&me), ui::account(email, enabled, Some("Saved."), None)).into_response())
+}
+
 // ---------- new repo ----------
 
 async fn new_page(State(app): St, Authed(u): Authed) -> Res {
@@ -827,7 +911,9 @@ fn settings_response(app: &App, ctx: &Ctx, msg: Option<&str>, err: Option<&str>)
     if !owners.iter().any(|o| o.eq_ignore_ascii_case(&ctx.repo.owner)) {
         owners.insert(0, ctx.repo.owner.clone());
     }
+    let teams = app.db.repo_teams(ctx.repo.id)?;
     let data = ui::SettingsData {
+        teams: &teams,
         branches: &branches,
         default_branch: default.as_deref(),
         collaborators: &collaborators,
@@ -871,11 +957,12 @@ struct GeneralF {
     default_branch: Option<String>,
     private: Option<String>,
     archived: Option<String>,
+    show_last_commit: Option<String>,
 }
 
 async fn settings_general(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>, Form(f): Form<GeneralF>) -> Res {
     let ctx = admin_ctx(&app, u.clone(), &owner, &name).await?;
-    app.db.update_repo(ctx.repo.id, f.description.trim(), f.private.is_some(), f.archived.is_some())?;
+    app.db.update_repo(ctx.repo.id, f.description.trim(), f.private.is_some(), f.archived.is_some(), f.show_last_commit.is_some())?;
     if let Some(b) = f.default_branch.filter(|b| !b.is_empty()) {
         if let Err(e) = git::set_default_branch(&ctx.dir, &b) {
             let ctx = admin_ctx(&app, u, &owner, &name).await?;
@@ -1091,8 +1178,18 @@ fn org_settings_response(app: &App, u: &User, org: &str, msg: Option<&str>, err:
     let o = admin_org(app, u, org)?;
     let members = app.db.members(o.id)?;
     let n = app.db.repo_count(&o.name)?;
+    let teams: Vec<ui::TeamRow> = app
+        .db
+        .teams(o.id)?
+        .into_iter()
+        .map(|(id, name, description)| {
+            let members = app.db.team_members(id).map(|m| m.len()).unwrap_or(0);
+            let repos = app.db.team_repos(id).map(|r| r.len()).unwrap_or(0);
+            ui::TeamRow { id, name, description, members, repos }
+        })
+        .collect();
     let status = if err.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
-    Ok((status, ui::page("org settings", Some(u), ui::org_settings(&o, &members, n, msg, err))).into_response())
+    Ok((status, ui::page("org settings", Some(u), ui::org_settings(&o, &members, n, &teams, msg, err))).into_response())
 }
 
 async fn org_settings(State(app): St, Authed(u): Authed, Path(org): Path<String>) -> Res {
@@ -1136,6 +1233,108 @@ async fn org_member_remove(State(app): St, Authed(u): Authed, Path(org): Path<St
     org_settings_response(&app, &u, &org, Some(&format!("Removed {}.", f.name)), None)
 }
 
+#[derive(Deserialize)]
+struct TeamF {
+    name: String,
+    description: Option<String>,
+}
+
+async fn team_create(State(app): St, Authed(u): Authed, Path(org): Path<String>, Form(f): Form<TeamF>) -> Res {
+    let o = admin_org(&app, &u, &org)?;
+    let name = f.name.trim();
+    let bad = (name.is_empty() || name.len() > 50 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b" ._-".contains(&b)))
+        .then_some("Team names: letters, digits, spaces, . _ - (max 50).");
+    if let Some(e) = bad {
+        return org_settings_response(&app, &u, &org, None, Some(e));
+    }
+    match app.db.create_team(o.id, name, f.description.as_deref().unwrap_or("").trim()) {
+        Ok(_) => org_settings_response(&app, &u, &org, Some("Team created."), None),
+        Err(e) if crate::issues_web::is_unique_violation(&e) => org_settings_response(&app, &u, &org, None, Some("A team with that name exists.")),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The team, if it belongs to an org this user administers.
+fn team_ctx(app: &App, u: &User, org: &str, id: i64) -> Result<(crate::db::Owner, ui::TeamRow), Err> {
+    let o = admin_org(app, u, org)?;
+    let (_, name, description) = app.db.teams(o.id)?.into_iter().find(|(tid, _, _)| *tid == id).ok_or(Err::NotFound)?;
+    let t = ui::TeamRow { id, name, description, members: 0, repos: 0 };
+    Ok((o, t))
+}
+
+fn team_response(app: &App, u: &User, org: &str, id: i64, msg: Option<&str>, err: Option<&str>) -> Res {
+    let (o, mut team) = team_ctx(app, u, org, id)?;
+    let members = app.db.team_members(id)?;
+    let repos = app.db.team_repos(id)?;
+    team.members = members.len();
+    team.repos = repos.len();
+    let all: Vec<String> = app.db.visible_repos(Some(u), Some(&o.name))?.into_iter().map(|r| format!("{}/{}", r.owner, r.name)).collect();
+    let status = if err.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
+    Ok((status, ui::page("team", Some(u), ui::team_page(&o, &team, &members, &repos, &all, msg, err))).into_response())
+}
+
+async fn team_page(State(app): St, Authed(u): Authed, Path((org, id)): Path<(String, i64)>) -> Res {
+    team_response(&app, &u, &org, id, None, None)
+}
+
+async fn team_member_add(State(app): St, Authed(u): Authed, Path((org, id)): Path<(String, i64)>, Form(f): Form<CollabF>) -> Res {
+    team_ctx(&app, &u, &org, id)?;
+    let Some(role) = crate::cli::parse_role(f.role.as_deref().unwrap_or("write")) else {
+        return team_response(&app, &u, &org, id, None, Some("Role must be read, write or admin."));
+    };
+    let Some(t) = app.db.user_by_name(f.name.trim())? else {
+        return team_response(&app, &u, &org, id, None, Some(&format!("No user named '{}'.", f.name.trim())));
+    };
+    app.db.set_team_member(id, t.id, role)?;
+    team_response(&app, &u, &org, id, Some(&format!("{} updated.", t.name)), None)
+}
+
+async fn team_member_remove(State(app): St, Authed(u): Authed, Path((org, id)): Path<(String, i64)>, Form(f): Form<CollabF>) -> Res {
+    team_ctx(&app, &u, &org, id)?;
+    app.db.remove_team_member(id, &f.name)?;
+    team_response(&app, &u, &org, id, Some(&format!("Removed {}.", f.name)), None)
+}
+
+#[derive(Deserialize)]
+struct TeamRepoF {
+    repo: String,
+    role: Option<String>,
+}
+
+async fn team_repo_grant(State(app): St, Authed(u): Authed, Path((org, id)): Path<(String, i64)>, Form(f): Form<TeamRepoF>) -> Res {
+    let (o, _) = team_ctx(&app, &u, &org, id)?;
+    let Some(role) = crate::cli::parse_role(f.role.as_deref().unwrap_or("write")) else {
+        return team_response(&app, &u, &org, id, None, Some("Role must be read, write or admin."));
+    };
+    // The form sends "owner/name"; only the org's own repositories are valid.
+    let Some((ro, rn)) = f.repo.trim().split_once('/') else {
+        return team_response(&app, &u, &org, id, None, Some("Pick one of the org's repositories."));
+    };
+    let Some(repo) = app.db.repo(ro, rn)? else {
+        return team_response(&app, &u, &org, id, None, Some("Pick one of the org's repositories."));
+    };
+    if !ro.eq_ignore_ascii_case(&o.name) {
+        return team_response(&app, &u, &org, id, None, Some("Pick one of the org's repositories."));
+    }
+    app.db.grant_team_repo(id, repo.id, role)?;
+    team_response(&app, &u, &org, id, Some(&format!("{} granted.", f.repo.trim())), None)
+}
+
+async fn team_repo_revoke(State(app): St, Authed(u): Authed, Path((org, id)): Path<(String, i64)>, Form(f): Form<TeamRepoF>) -> Res {
+    team_ctx(&app, &u, &org, id)?;
+    app.db.revoke_team_repo(id, f.repo.trim())?;
+    team_response(&app, &u, &org, id, Some("Revoked."), None)
+}
+
+async fn team_delete(State(app): St, Authed(u): Authed, Path((org, id)): Path<(String, i64)>, Form(f): Form<ConfirmF>) -> Res {
+    let (o, team) = team_ctx(&app, &u, &org, id)?;
+    if f.confirm.trim() != team.name {
+        return team_response(&app, &u, &org, id, None, Some(&format!("Type {} exactly to confirm.", team.name)));
+    }
+    app.db.delete_team(o.id, id)?;
+    org_settings_response(&app, &u, &org, Some("Team deleted."), None)
+}
+
 async fn org_delete(State(app): St, Authed(u): Authed, Path(org): Path<String>, Form(f): Form<ConfirmF>) -> Res {
     let o = admin_org(&app, &u, &org)?;
     if app.db.repo_count(&o.name)? > 0 {
@@ -1156,6 +1355,7 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/static/style.css", get(css))
+        .route("/avatar/{name}", get(avatar_route))
         .route("/login", get(login_page).post(login))
         .route("/login/totp", get(totp_page).post(totp_submit))
         .route("/logout", post(logout))
@@ -1167,6 +1367,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/settings/tokens", get(tokens_page).post(tokens_add))
         .route("/settings/tokens/{id}/delete", post(tokens_delete))
         .route("/settings/password", get(password_page).post(password_change))
+        .route("/settings/account", get(account_page).post(account_save))
         .route("/settings/2fa", get(totp_settings))
         .route("/settings/2fa/enable", post(totp_enable))
         .route("/settings/2fa/disable", post(totp_disable))
@@ -1175,6 +1376,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/settings/general", post(org_general))
         .route("/{owner}/settings/members", post(org_member_add))
         .route("/{owner}/settings/members/remove", post(org_member_remove))
+        .route("/{owner}/settings/teams", post(team_create))
+        .route("/{owner}/settings/teams/{id}", get(team_page))
+        .route("/{owner}/settings/teams/{id}/members", post(team_member_add))
+        .route("/{owner}/settings/teams/{id}/members/remove", post(team_member_remove))
+        .route("/{owner}/settings/teams/{id}/repos", post(team_repo_grant))
+        .route("/{owner}/settings/teams/{id}/repos/remove", post(team_repo_revoke))
+        .route("/{owner}/settings/teams/{id}/delete", post(team_delete))
         .route("/{owner}/settings/delete", post(org_delete))
         .route("/{owner}/{name}", get(overview))
         .route("/{owner}/{name}/info/refs", get(githttp::info_refs))
@@ -1185,6 +1393,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/raw/{*rest}", get(raw))
         .route("/{owner}/{name}/blame/{*rest}", get(blame))
         .route("/{owner}/{name}/log/{*rev}", get(log))
+        .route("/{owner}/{name}/graph/{*rev}", get(graph))
         .route("/{owner}/{name}/commit/{rev}", get(commit))
         .route("/{owner}/{name}/refs", get(refs))
         .route("/{owner}/{name}/star", post(star))
@@ -1211,5 +1420,6 @@ pub fn router(app: Arc<App>) -> Router {
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
         .layer(middleware::from_fn_with_state(app.clone(), crate::ops::count))
+        .layer(middleware::from_fn_with_state(app.clone(), crate::ops::rate_limit))
         .with_state(app)
 }

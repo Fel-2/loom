@@ -349,6 +349,47 @@ CREATE TABLE mirrors (
 );
 ";
 
+/// v7: draft/prerelease releases, email notifications, opt-in last-commit
+/// badges, org teams with per-repo grants.
+const SCHEMA_V7: &str = "
+ALTER TABLE releases ADD COLUMN draft INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE releases ADD COLUMN prerelease INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN notify_email INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE repos ADD COLUMN show_last_commit INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE teams (
+    id INTEGER PRIMARY KEY,
+    org_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    description TEXT NOT NULL DEFAULT '',
+    created INTEGER NOT NULL,
+    UNIQUE (org_id, name)
+);
+CREATE TABLE team_members (
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role INTEGER NOT NULL DEFAULT 2,
+    PRIMARY KEY (team_id, user_id)
+);
+CREATE INDEX team_members_user ON team_members(user_id);
+CREATE TABLE team_repos (
+    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    role INTEGER NOT NULL DEFAULT 2,
+    PRIMARY KEY (team_id, repo_id)
+);
+CREATE INDEX team_repos_repo ON team_repos(repo_id);
+CREATE TABLE mail_outbox (
+    id INTEGER PRIMARY KEY,
+    to_addr TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX mail_due ON mail_outbox(sent, id);
+";
+
 pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
     ("bug", "#d73a4a", "Something is broken"),
     ("enhancement", "#84b6eb", "New feature or request"),
@@ -415,6 +456,8 @@ pub struct Repo {
     pub fork_of: Option<i64>,
     /// Pull mirror: looms fetches refs from `mirrors.url`; pushes are refused.
     pub mirror: bool,
+    /// Opt-in: tree view shows the last commit touching each entry.
+    pub show_last_commit: bool,
 }
 
 pub struct Collaborator {
@@ -519,11 +562,12 @@ fn repo_row(r: &rusqlite::Row<'_>) -> Result<Repo> {
         archived: r.get(5)?,
         fork_of: r.get(6)?,
         mirror: r.get(7)?,
+        show_last_commit: r.get(8)?,
     })
 }
 
 const USER_COLS: &str = "id, name, email, is_admin";
-const REPO_COLS: &str = "id, owner, name, description, private, archived, fork_of, mirror";
+const REPO_COLS: &str = "id, owner, name, description, private, archived, fork_of, mirror, show_last_commit";
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -550,6 +594,9 @@ impl Db {
         }
         if v < 6 {
             c.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
+        }
+        if v < 7 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
         }
         Ok(Db(Mutex::new(c)))
     }
@@ -866,7 +913,9 @@ impl Db {
                AND (r.private = 0 OR ?2 OR r.owner = ?3
                     OR EXISTS (SELECT 1 FROM collaborators c WHERE c.repo_id = r.id AND c.user_id = ?4)
                     OR EXISTS (SELECT 1 FROM org_members m JOIN users o ON o.id = m.org_id
-                               WHERE o.name = r.owner AND m.user_id = ?4))
+                               WHERE o.name = r.owner AND m.user_id = ?4)
+                    OR EXISTS (SELECT 1 FROM team_repos tr JOIN team_members tm ON tm.team_id = tr.team_id
+                               WHERE tr.repo_id = r.id AND tm.user_id = ?4))
              ORDER BY r.owner, r.name"
         ))?;
         st.query_map(params![owner, admin, uname, uid], repo_row)?.collect()
@@ -886,7 +935,10 @@ impl Db {
                     SELECT role FROM collaborators WHERE repo_id = ?1 AND user_id = ?2
                     UNION ALL
                     SELECT m.role FROM org_members m JOIN users o ON o.id = m.org_id
-                    WHERE o.name = ?3 AND o.is_org = 1 AND m.user_id = ?2)",
+                    WHERE o.name = ?3 AND o.is_org = 1 AND m.user_id = ?2
+                    UNION ALL
+                    SELECT tr.role FROM team_repos tr JOIN team_members tm ON tm.team_id = tr.team_id
+                    WHERE tr.repo_id = ?1 AND tm.user_id = ?2)",
                 params![repo.id, u.id, repo.owner],
                 |r| r.get(0),
             )
@@ -914,10 +966,10 @@ impl Db {
         Ok(v)
     }
 
-    pub fn update_repo(&self, id: i64, description: &str, private: bool, archived: bool) -> Result<()> {
+    pub fn update_repo(&self, id: i64, description: &str, private: bool, archived: bool, show_last_commit: bool) -> Result<()> {
         self.c().execute(
-            "UPDATE repos SET description = ?1, private = ?2, archived = ?3 WHERE id = ?4",
-            params![description, private, archived, id],
+            "UPDATE repos SET description = ?1, private = ?2, archived = ?3, show_last_commit = ?4 WHERE id = ?5",
+            params![description, private, archived, show_last_commit, id],
         )?;
         Ok(())
     }
@@ -1129,6 +1181,126 @@ impl Db {
     pub fn repo_count_total(&self) -> Result<i64> {
         self.c().query_row("SELECT COUNT(*) FROM repos", [], |r| r.get(0))
     }
+
+    // ---- teams ----
+
+    pub fn teams(&self, org_id: i64) -> Result<Vec<(i64, String, String)>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT id, name, description FROM teams WHERE org_id = ?1 ORDER BY name")?;
+        st.query_map([org_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+    }
+
+    pub fn create_team(&self, org_id: i64, name: &str, description: &str) -> Result<i64> {
+        let c = self.c();
+        c.execute(
+            "INSERT INTO teams (org_id, name, description, created) VALUES (?1, ?2, ?3, ?4)",
+            params![org_id, name, description, now()],
+        )?;
+        Ok(c.last_insert_rowid())
+    }
+
+    pub fn delete_team(&self, org_id: i64, id: i64) -> Result<()> {
+        self.c().execute("DELETE FROM teams WHERE id = ?1 AND org_id = ?2", params![id, org_id])?;
+        Ok(())
+    }
+
+    pub fn team_members(&self, team_id: i64) -> Result<Vec<Member>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT u.name, tm.role FROM team_members tm JOIN users u ON u.id = tm.user_id
+             WHERE tm.team_id = ?1 ORDER BY u.name",
+        )?;
+        st.query_map([team_id], |r| Ok(Member { name: r.get(0)?, access: Access::from_role(r.get(1)?) }))?.collect()
+    }
+
+    pub fn set_team_member(&self, team_id: i64, user_id: i64, access: Access) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO team_members (team_id, user_id, role) VALUES (?1, ?2, ?3)
+             ON CONFLICT (team_id, user_id) DO UPDATE SET role = excluded.role",
+            params![team_id, user_id, access as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_team_member(&self, team_id: i64, name: &str) -> Result<()> {
+        self.c().execute(
+            "DELETE FROM team_members WHERE team_id = ?1 AND user_id = (SELECT id FROM users WHERE name = ?2)",
+            params![team_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// (repo full name, role) granted to a team.
+    pub fn team_repos(&self, team_id: i64) -> Result<Vec<(String, Access)>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT r.owner || '/' || r.name, tr.role FROM team_repos tr JOIN repos r ON r.id = tr.repo_id
+             WHERE tr.team_id = ?1 ORDER BY 1",
+        )?;
+        st.query_map([team_id], |r| Ok((r.get(0)?, Access::from_role(r.get(1)?))))?.collect()
+    }
+
+    pub fn grant_team_repo(&self, team_id: i64, repo_id: i64, access: Access) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO team_repos (team_id, repo_id, role) VALUES (?1, ?2, ?3)
+             ON CONFLICT (team_id, repo_id) DO UPDATE SET role = excluded.role",
+            params![team_id, repo_id, access as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn revoke_team_repo(&self, team_id: i64, full: &str) -> Result<()> {
+        self.c().execute(
+            "DELETE FROM team_repos WHERE team_id = ?1 AND repo_id = (SELECT id FROM repos WHERE owner || '/' || name = ?2)",
+            params![team_id, full],
+        )?;
+        Ok(())
+    }
+
+    /// Teams (name, role) with access to a repo.
+    pub fn repo_teams(&self, repo_id: i64) -> Result<Vec<(String, Access)>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT t.name, tr.role FROM team_repos tr JOIN teams t ON t.id = tr.team_id WHERE tr.repo_id = ?1 ORDER BY t.name",
+        )?;
+        st.query_map([repo_id], |r| Ok((r.get(0)?, Access::from_role(r.get(1)?))))?.collect()
+    }
+
+    // ---- email notifications ----
+
+    pub fn set_notify_email(&self, user_id: i64, email: &str, enabled: bool) -> Result<()> {
+        self.c().execute("UPDATE users SET email = ?1, notify_email = ?2 WHERE id = ?3", params![email, enabled, user_id])?;
+        Ok(())
+    }
+
+    pub fn notify_prefs(&self, user_id: i64) -> Result<(String, bool)> {
+        self.c().query_row("SELECT email, notify_email FROM users WHERE id = ?1", [user_id], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+
+    pub fn queue_mail(&self, to: &str, subject: &str, body: &str) -> Result<()> {
+        self.c().execute(
+            "INSERT INTO mail_outbox (to_addr, subject, body, created) VALUES (?1, ?2, ?3, ?4)",
+            params![to, subject, body, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_due_mail(&self) -> bool {
+        self.c().query_row("SELECT EXISTS (SELECT 1 FROM mail_outbox WHERE sent = 0)", [], |r| r.get(0)).unwrap_or(false)
+    }
+
+    /// Unsent mail, oldest first.
+    pub fn due_mail(&self, limit: i64) -> Result<Vec<(i64, String, String, String)>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT id, to_addr, subject, body FROM mail_outbox WHERE sent = 0 ORDER BY id LIMIT ?1")?;
+        st.query_map([limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+    }
+
+    pub fn mark_mail(&self, id: i64, ok: bool, error: &str) -> Result<()> {
+        self.c().execute("UPDATE mail_outbox SET sent = ?1, error = ?2 WHERE id = ?3", params![ok, error, id])?;
+        Ok(())
+    }
+
 
     pub fn repo_count(&self, owner: &str) -> Result<i64> {
         self.c().query_row("SELECT COUNT(*) FROM repos WHERE owner = ?1", [owner], |r| r.get(0))

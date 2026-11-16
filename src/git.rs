@@ -227,6 +227,75 @@ fn commit_info(c: &gix::Commit<'_>) -> Result<CommitInfo> {
     })
 }
 
+/// Last commit touching `path` at `commit` (sha, author, time), memoized.
+pub fn last_commit(dir: &Path, commit: &str, path: &str) -> Option<BlameLine> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<(String, String, String), (String, String, i64)>>> = OnceLock::new();
+    let key = (dir.display().to_string(), commit.to_owned(), path.to_owned());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((sha, author, time)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() {
+        return Some(BlameLine { sha, author, time, text: String::new() });
+    }
+    let o = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(dir)
+        .args(["log", "-1", "--format=%H%x00%an%x00%at", commit, "--", path])
+        .env_remove("GIT_DIR")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&o.stdout);
+    let mut it = text.trim().split('\0');
+    let (sha, author, time) = (it.next()?, it.next()?, it.next()?.parse().ok()?);
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if c.len() >= 4096 {
+        c.clear();
+    }
+    c.insert(key, (sha.to_owned(), author.to_owned(), time));
+    Some(BlameLine { sha: sha[..sha.len().min(8)].to_owned(), author: author.to_owned(), time, text: String::new() })
+}
+
+/// File names in `dir` at `commit` (empty if absent).
+pub fn dir_files(repo: &gix::Repository, commit: ObjectId, dir: &str) -> Vec<String> {
+    tree(repo, commit, dir).map(|v| v.into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect()).unwrap_or_default()
+}
+
+/// Text file at `path` at `commit`.
+pub fn text_file(repo: &gix::Repository, commit: ObjectId, path: &str) -> Option<String> {
+    let (_, data) = blob(repo, commit, path).ok()?;
+    String::from_utf8(data).ok()
+}
+
+/// Issue/PR template names and bodies from `.loom/` or `.github/`.
+pub fn templates(repo: &gix::Repository, commit: ObjectId, kind: &str) -> Vec<(String, String)> {
+    let dirs: &[&str] = if kind == "issues" {
+        &[".loom/ISSUE_TEMPLATE", ".github/ISSUE_TEMPLATE"]
+    } else {
+        &[".loom", ".github"]
+    };
+    let mut out = Vec::new();
+    for d in dirs {
+        for name in dir_files(repo, commit, d) {
+            let ok = if kind == "issues" {
+                name.ends_with(".md") || name.ends_with(".markdown")
+            } else {
+                name.to_ascii_lowercase().starts_with("pull_request_template")
+            };
+            if ok {
+                if let Some(body) = text_file(repo, commit, &format!("{d}/{name}")) {
+                    out.push((name.clone(), body));
+                }
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
 /// Tip of `refs/heads/<branch>` via gix (no subprocess).
 pub fn branch_tip(dir: &Path, branch: &str) -> Option<ObjectId> {
     let repo = open(dir).ok()?;

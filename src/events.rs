@@ -220,6 +220,27 @@ fn notify(db: &Db, ev: &Ev<'_>) {
     for (u, reason) in recipients {
         if db.access(Some(&u), repo).is_ok_and(|a| a >= Access::Read) {
             let _ = db.notify(u.id, repo.id, issue.id, reason, actor_id);
+            // Email only to people who opted in; "watching" would be noise.
+            if reason != "watching" {
+                if let Ok((mail, on)) = db.notify_prefs(u.id) {
+                    if on && !mail.is_empty() {
+                        let kind = if issue.is_pr { "pulls" } else { "issues" };
+                        let subject = format!("[{}] #{} {}", repo.owner, issue.number, issue.title);
+                        let url = format!("{}/{}/{}/{kind}/{}", bus_url_for_mail(), repo.owner, repo.name, issue.number);
+                        let actor = actor.map_or_else(|| "someone".into(), |a| a.name.clone());
+                        let body = format!(
+                            "{actor} {verb} #{number} in {owner}/{name}: {title}\n\n{url}\n\nYou get this because you are {reason} on it. Turn email notifications off in Settings → account.",
+                            verb = match reason { "mention" => "mentioned you in", "assigned" => "assigned you in", "author" => "updated", _ => "updated" },
+                            number = issue.number,
+                            owner = repo.owner,
+                            name = repo.name,
+                            title = issue.title,
+                            url = url,
+                        );
+                        let _ = db.queue_mail(&mail, &subject, &body);
+                    }
+                }
+            }
         }
     }
 }
@@ -284,6 +305,62 @@ fn deliver_due(db: &Db) {
     }
 }
 
+fn bus_url_for_mail() -> String {
+    std::env::var("LOOM_URL").unwrap_or_default().trim_end_matches('/').to_owned()
+}
+
+/// Send queued mail through `LOOM_MAIL_CMD` (e.g. "/usr/sbin/sendmail -t"),
+/// which receives an RFC 822 message on stdin. No SMTP client, no TLS code:
+/// whatever MTA the operator already trusts. Returns (sent, failed).
+pub fn flush_mail(db: &Db, limit: i64) -> (usize, usize) {
+    let Ok(cmd) = std::env::var("LOOM_MAIL_CMD") else { return (0, 0) };
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return (0, 0);
+    }
+    let from = std::env::var("LOOM_MAIL_FROM").unwrap_or_else(|_| "loom <loom@localhost>".into());
+    let (mut sent, mut failed) = (0, 0);
+    for (id, to, subject, body) in db.due_mail(limit).unwrap_or_default() {
+        let msg = format!(
+            "To: {to}\nFrom: {from}\nSubject: {subject}\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: 8bit\n\n{body}\n"
+        );
+        let child = std::process::Command::new(parts[0])
+            .args(&parts[1..])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        match child {
+            Ok(mut c) => {
+                use std::io::Write;
+                if let Some(mut stdin) = c.stdin.take() {
+                    let _ = stdin.write_all(msg.as_bytes());
+                }
+                match c.wait_with_output() {
+                    Ok(o) if o.status.success() => {
+                        let _ = db.mark_mail(id, true, "");
+                        sent += 1;
+                    }
+                    Ok(o) => {
+                        let e = String::from_utf8_lossy(&o.stderr);
+                        let _ = db.mark_mail(id, true, &format!("exit {}: {}", o.status, e.chars().take(300).collect::<String>()));
+                        failed += 1;
+                    }
+                    Err(e) => {
+                        let _ = db.mark_mail(id, false, &e.to_string());
+                        failed += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = db.mark_mail(id, false, &e.to_string());
+                failed += 1;
+            }
+        }
+    }
+    (sent, failed)
+}
+
 /// Server task: deliver on wake-ups (in-process events) and every few
 /// seconds (events queued by hook processes, retries).
 pub async fn run_deliveries(app: std::sync::Arc<crate::app::App>) {
@@ -295,11 +372,21 @@ pub async fn run_deliveries(app: std::sync::Arc<crate::app::App>) {
             _ = wake().notified() => {}
         }
         // Only wake a blocking thread when there's work: idle stays 1 thread.
-        if !app.db.has_due_deliveries() {
+        let hooks = app.db.has_due_deliveries();
+        let mail = std::env::var("LOOM_MAIL_CMD").is_ok() && app.db.has_due_mail();
+        if !hooks && !mail {
             continue;
         }
         let a = app.clone();
-        let _ = tokio::task::spawn_blocking(move || deliver_due(&a.db)).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            if a.db.has_due_deliveries() {
+                deliver_due(&a.db);
+            }
+            if std::env::var("LOOM_MAIL_CMD").is_ok() {
+                flush_mail(&a.db, 20);
+            }
+        })
+        .await;
     }
 }
 

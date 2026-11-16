@@ -98,11 +98,14 @@ check "unassign bob"                             is "$(post alice /$R/issues/$I1
 echo "== milestones"
 check "bad due date rejected"                    is "$(post alice /$R/milestones -d "title=v$RUN" -d description= -d due=2026-13-40)" 400
 check "create milestone with due date"           is "$(post alice /$R/milestones -d "title=v$RUN" -d description=first -d due=2026-12-31)" 200
-MID=$(page alice /$R/milestones | grep -oE "/milestones/[0-9]+\"" | tail -1 | grep -oE '[0-9]+')
+# Pick the milestone by its title: pages accumulate milestones across runs.
+MID=$(page alice /$R/milestones | grep -oE "milestones/[0-9]+\"><input name=\"title\" value=\"v$RUN\"" | grep -oE '[0-9]+' | head -1)
 check "set milestone on issue"                   is "$(post alice /$R/issues/$I1/milestone -d milestone=$MID)" 303
 check "  milestone event + filter"               bash -c "curl -s $B/$R/issues/$I1 | grep -q 'added this to' && curl -s '$B/$R/issues?milestone=v$RUN' | grep -q 'bob bug $RUN v2'"
 check "  progress shows 0% with 1 open"          has "$(page anon /$R/milestones)" "0% · 1 open"
 check "duplicate milestone title -> 400"         is "$(post alice /$R/milestones -d "title=v$RUN" -d description= -d due=)" 400
+
+check "delete the test milestone"                is "$(post alice /$R/milestones/$MID/delete)" 200
 
 echo "== labels page"
 check "bad color rejected"                       is "$(post alice /$R/labels -d "name=l$RUN" -d 'color=red;background:url(x)' -d description=)" 400

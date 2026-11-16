@@ -31,6 +31,10 @@ pub struct App {
     pub started: i64,
     /// Ops counters (cheap atomics; surfaced at /metrics).
     pub stats: Stats,
+    /// Per-IP token buckets for the whole site (not just logins).
+    pub buckets: Mutex<HashMap<String, Bucket>>,
+    pub rate_read: f64,
+    pub rate_write: f64,
     /// Failed password attempts: per (client ip, user) and per ip.
     failures: Mutex<HashMap<String, (u32, i64)>>,
 }
@@ -48,6 +52,16 @@ fn own_binary() -> PathBuf {
         Some(p) => PathBuf::from(p),
         None => exe,
     }
+}
+
+pub struct Bucket {
+    pub tokens: f64,
+    pub last: std::time::Instant,
+}
+
+/// LOOM_RATE_READ / LOOM_RATE_WRITE per second per IP; 0 disables.
+fn rate(var: &str, default: f64) -> f64 {
+    std::env::var(var).ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v >= 0.0).unwrap_or(default)
 }
 
 #[derive(Default)]
@@ -168,6 +182,9 @@ impl App {
             secret,
             started: db::now(),
             stats: Stats::default(),
+            buckets: Mutex::new(HashMap::new()),
+            rate_read: rate("LOOM_RATE_READ", 2000.0),
+            rate_write: rate("LOOM_RATE_WRITE", 100.0),
             failures: Mutex::new(HashMap::new()),
         })
     }
@@ -348,6 +365,10 @@ impl App {
             let _ = std::fs::rename(&dest, &dir);
             return Err(e.to_string());
         }
+        // SQLite reuses row ids, so leftovers under this id would otherwise
+        // become the *next* repo's LFS objects and release assets.
+        let _ = std::fs::remove_dir_all(self.data.join("lfs").join(repo.id.to_string()));
+        let _ = std::fs::remove_dir_all(self.data.join("releases").join(repo.id.to_string()));
         Ok(())
     }
 

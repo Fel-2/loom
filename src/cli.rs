@@ -18,6 +18,8 @@ usage: loom [serve]
        loom repo list
        loom version
        loom backup <dir> [--repos]
+       loom mail flush          (send queued notifications via LOOM_MAIL_CMD)
+       loom lfs gc [--dry-run] [--repo owner/name]
        loom repo maintain     write commit-graphs for all repos (speeds up history)
        loom org create <name> <admin-user>
        loom org add <org> <user> [read|write|admin]
@@ -96,6 +98,19 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
         ("repo", Some("adopt")) => repo_adopt(&app),
         ("repo", Some("list")) => repo_list(&app),
         ("repo", Some("maintain")) => repo_maintain(&app),
+        ("lfs", Some("gc")) => {
+            let dry = flag(rest, "--dry-run");
+            let only = opt(rest, "--repo").map(str::to_owned);
+            crate::lfs::gc(&app, dry, only.as_deref()).and_then(|(n, b)| {
+                println!("{}{n} objects, {} bytes", if dry { "would remove " } else { "removed " }, b);
+                Ok(())
+            })
+        }
+        ("mail", Some("flush")) => {
+            let (sent, failed) = crate::events::flush_mail(&app.db, 200);
+            println!("mail: {sent} sent, {failed} failed");
+            Ok(())
+        }
         ("org", Some("create")) => org_create(&app, rest),
         ("org", Some("add")) => org_add(&app, rest),
         _ => Err(USAGE.into()),

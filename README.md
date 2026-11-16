@@ -30,8 +30,15 @@ Full numbers and method: [`bench/results/SUMMARY.md`](bench/results/SUMMARY.md).
   reviews, no-JS inline comments, merge/squash/rebase, "merged by push".
 - **Git LFS**: batch API, uploads verified by SHA-256, `git-lfs-authenticate`
   over SSH so LFS works with SSH remotes too; storage under `data/lfs/`.
-- **Releases**: notes per tag, uploaded assets with download counts, source
-  tarballs (`git archive`).
+- **Releases**: notes per tag, drafts and pre-release flags, uploaded assets
+  with download counts, source tarballs (`git archive`).
+- **Templates**: `ISSUE_TEMPLATE/*.md` and `PULL_REQUEST_TEMPLATE.md` from
+  `.loom/` or `.github/` prefill new issues and PR descriptions.
+- **Org teams**: members with a role per team, and per-repo grants.
+- **Extras**: deterministic identicon avatars (no external service), a commit
+  graph view (`git log --graph`), opt-in "last commit" badges per repo
+  (off by default: they cost ~1 s per large directory), per-IP rate limiting,
+  email notifications piped to your MTA, `loom lfs gc`.
 - **Integrations**: signed webhooks with retries and a delivery log, commit
   statuses API + combined status, REST API v1 with bearer tokens,
   notifications, activity feed, full-text search (issues/PRs/comments) and
@@ -63,6 +70,11 @@ printf 'a-long-password' | ./target/release/loom user add you --admin --password
 | `LOOM_TRUST_PROXY` | unset | `1` trusts `X-Forwarded-For` (behind a reverse proxy) |
 | `LOOM_GIT_THREADS` | `4` | Blocking threads for git work |
 | `LOOM_MAX_GIT` | `8` | Max concurrent streaming git processes (clones/pushes) |
+| `LOOM_LFS_MAX_MB` | `2048` | Largest single LFS object |
+| `LOOM_RATE_READ` | `2000` | Requests/second/IP for reads (0 disables) |
+| `LOOM_RATE_WRITE` | `100` | Requests/second/IP for writes (0 disables) |
+| `LOOM_MAIL_CMD` | unset | Send notification mail with this command (e.g. `/usr/sbin/sendmail -t`) |
+| `LOOM_MAIL_FROM` | `loom <loom@localhost>` | From: header |
 
 Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 
@@ -80,6 +92,10 @@ Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 - **Health / metrics**: `GET /healthz` (JSON, 503 when the DB or storage is
   broken) and `GET /metrics` (Prometheus text: uptime, request counters,
   in-flight requests, free git slots, RSS, threads, repo count).
+- **Maintenance**: `loom lfs gc [--dry-run]` deletes LFS objects no longer
+  referenced by any ref (and objects of deleted repositories);
+  `loom mail flush` sends queued notifications; `loom repo maintain` rebuilds
+  commit-graphs.
 - **Backups**: `loom backup /backups --repos` writes a consistent SQLite
   snapshot (`VACUUM INTO`) plus a copy of the repositories (reflink when the
   filesystem supports it). Run it from cron; restore is "stop loom, put the
@@ -104,6 +120,7 @@ tests/m5.sh      # pull requests, merges, revisions (71)
 tests/m6.sh      # webhooks, statuses, API, notifications, search (61)
 tests/m7.sh      # highlighting, caps, blame, releases, 2FA, mirrors (48)
 tests/m8.sh      # LFS (real git-lfs), healthz, metrics, backup, version (21)
+tests/m9.sh      # templates, drafts, avatars, graph, teams, email, LFS gc, rate limits (42)
 cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, ...)
 ```
 

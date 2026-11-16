@@ -143,3 +143,13 @@ Git LFS (batch API, SHA-256-verified uploads, authenticated downloads,
 file, hardened systemd unit; `/healthz` and `/metrics`; `loom backup <dir>
 [--repos]` (SQLite VACUUM INTO + reflink copy) and `loom version`; startup
 fails fast if git is missing. tests/m8.sh: 21 checks.
+
+## 10. Completeness pass
+
+Issue/PR templates, draft and pre-release releases, identicon avatars, commit
+graph view, per-repo opt-in last-commit badges, org teams with per-repo grants,
+email notifications via `LOOM_MAIL_CMD` (no SMTP code in loom), `loom lfs gc`
+(with orphan-repo cleanup; SIGPIPE-safe CLI output), per-IP rate limiting.
+Fixed along the way: repo row ids are reused after deletion, so delete now
+drops the repo's LFS objects and release assets; GC enumerates objects without
+deadlocking on pipe buffers. tests/m9.sh: 42 checks.

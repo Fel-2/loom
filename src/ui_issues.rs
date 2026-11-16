@@ -170,7 +170,7 @@ pub struct ShowData<'a> {
 }
 
 fn who(_base: &str, name: &Option<String>) -> Markup {
-    html! { @match name { Some(n) => a.who href={ "/" (n) } { (n) }, None => span.who { "ghost" } } }
+    html! { @match name { Some(n) => (crate::ui::user_link(n, 20)), None => span.who { "ghost" } } }
 }
 
 pub fn show(d: &ShowData<'_>) -> Markup {
