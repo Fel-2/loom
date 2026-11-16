@@ -71,6 +71,9 @@ Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 - **Container**: `docker compose up -d` (Dockerfile is two-stage; the runtime
   image carries git). First admin:
   `docker compose exec loom loom user add you --admin --password-stdin`.
+  The container runs as uid 10001, so a bind-mounted `./data` is owned by that
+  uid — either `chown -R 10001 data` on the host (if you want direct access for
+  backups) or use a named volume.
 - **systemd**: `deploy/loom.service` (hardened: loom can only write
   `LOOM_DATA`). Put a reverse proxy in front for TLS and set `LOOM_URL` to the
   public URL; add `LOOM_TRUST_PROXY=1` if the proxy sets `X-Forwarded-For`.
@@ -100,7 +103,7 @@ tests/m4.sh      # issues, labels, milestones, references (65)
 tests/m5.sh      # pull requests, merges, revisions (71)
 tests/m6.sh      # webhooks, statuses, API, notifications, search (61)
 tests/m7.sh      # highlighting, caps, blame, releases, 2FA, mirrors (48)
-tests/m8.sh      # LFS (real git-lfs), healthz, metrics, backup, version
+tests/m8.sh      # LFS (real git-lfs), healthz, metrics, backup, version (21)
 cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, ...)
 ```
 
