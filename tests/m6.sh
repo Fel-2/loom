@@ -7,7 +7,7 @@ set -u
 B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
 SSH_PORT=${LOOM_TEST_SSH_PORT:-2917}
 KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
-RECV=${RECV:-$HOME/.cache/loom-bench/hookrecv-tool/recv.py}
+RECV=${RECV:-$(cd "$(dirname "$0")" && pwd)/hookrecv/recv.py}
 W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m6.XXXXXX")
 RUN=$$
 REPO=m6r$RUN

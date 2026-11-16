@@ -6,8 +6,9 @@ set -u
 B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
 SSH_PORT=${LOOM_TEST_SSH_PORT:-2917}
 KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
-DATA=${LOOM_DATA:-$HOME/Projects/loom/data}
-LOOM=${LOOM:-$HOME/Projects/loom/target/release/loom}
+ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+DATA=${LOOM_DATA:-$ROOT/data}
+LOOM=${LOOM:-$ROOT/target/release/loom}
 RUN=$$
 REPO=m7r$RUN
 SRC=m7s$RUN

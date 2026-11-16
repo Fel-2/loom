@@ -7,7 +7,8 @@ set -u
 B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
 SSH_PORT=${LOOM_TEST_SSH_PORT:-2917}
 KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
-DATA=${LOOM_DATA:-$HOME/Projects/loom/data}
+ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+DATA=${LOOM_DATA:-$ROOT/data}
 W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m5.XXXXXX")
 RUN=$$
 REPO=pr$RUN

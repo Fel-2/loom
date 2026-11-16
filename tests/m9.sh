@@ -6,8 +6,9 @@ set -u
 B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
 SSH_PORT=${LOOM_TEST_SSH_PORT:-2917}
 KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
-DATA=${LOOM_DATA:-$HOME/Projects/loom/data}
-LOOM=${LOOM:-$HOME/Projects/loom/target/release/loom}
+ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+DATA=${LOOM_DATA:-$ROOT/data}
+LOOM=${LOOM:-$ROOT/target/release/loom}
 GITLFS=${GITLFS:-$HOME/.cache/loom-bench/bin}
 RUN=$$
 REPO=t9r$RUN
@@ -18,6 +19,7 @@ post() { local who=$1 path=$2; shift 2; curl -s -X POST -o "$W/last.html" -w '%{
 getc() { curl -s -o "$W/last.html" -w '%{http_code}' -b "$W/$1.jar" "$B$2"; }
 page() { curl -s -b "$W/$1.jar" "$B$2"; }
 cleanup() {
+  [ -n "${RPID:-}" ] && kill "$RPID" 2>/dev/null
   post alice /$R/settings/delete -d confirm=$R >/dev/null 2>&1
   post alice /$ORG/tpriv/settings/delete -d confirm=$ORG/tpriv >/dev/null 2>&1
   post alice /$ORG/settings/delete -d confirm=$ORG >/dev/null 2>&1
@@ -122,12 +124,24 @@ check "  and not the referenced object"         bash -c "! LOOM_DATA=$DATA $LOOM
 check "gc removes it"                           bash -c "LOOM_DATA=$DATA $LOOM lfs gc --repo $R | grep -q 'removed 1 objects'"
 check "  orphan is gone, referenced still served" bash -c "u() { curl -s -o /dev/null -w '%{http_code}' -u alice:alice-test-pw $B/$R.git/info/lfs/objects/\$1; }; [ \$(u $OID1) = 200 ] && [ \$(u $OID2) = 404 ]"
 
-echo "== rate limiting (writes, default 100/s burst 200)"
+echo "== rate limiting (own instance, writes capped at 2/s)"
+RATE_PORT=${LOOM_RATE_TEST_PORT:-3931}
+LOOM_DATA="$W/ratedata" LOOM_ADDR="127.0.0.1:$RATE_PORT" LOOM_SSH_ADDR=off \
+  LOOM_URL="http://127.0.0.1:$RATE_PORT" LOOM_RATE_WRITE=2 LOOM_RATE_READ=0 \
+  setsid "$LOOM" serve >"$W/rate.log" 2>&1 &
+RPID=$!
+for _ in $(seq 60); do curl -sf "http://127.0.0.1:$RATE_PORT/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
 : > "$W/codes"
-for i in $(seq 260); do curl -s -o /dev/null -w '%{http_code}\n' -X POST -b "$W/anon.jar" -H "Origin: $B" -d x=1 "$B/nonexistent-$i" >> "$W/codes" & done
-wait
+pids=()
+for i in $(seq 20); do
+  ( curl -s -m 10 -o /dev/null -w '%{http_code}\n' -X POST -d x=1 "http://127.0.0.1:$RATE_PORT/login" >> "$W/codes" ) &
+  pids+=($!)
+done
+wait "${pids[@]}"
+kill "$RPID" 2>/dev/null
 codes=$(cat "$W/codes")
 check "a write burst is partly refused (429)"   bash -c "grep -q 429 <<<'$codes'"
+check "  and some requests still get through"   bash -c "grep -qE '^(401|400|303|422)$' <<<'$codes'"
 
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
