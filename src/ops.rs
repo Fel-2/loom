@@ -4,8 +4,11 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use axum::extract::State;
-use axum::http::{header, HeaderValue};
+use axum::body::Body;
+use axum::extract::{Request, State};
+use http_body::Body as _;
+use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -127,4 +130,68 @@ pub async fn rate_limit(State(app): State<Arc<App>>, req: axum::extract::Request
         return res;
     }
     next.run(req).await
+}
+
+const GZIP_MIN: usize = 512;
+const GZIP_MAX: usize = 256 * 1024;
+
+fn gzip_wanted(req: &Request) -> bool {
+    if req.method() == Method::HEAD {
+        return false;
+    }
+    req.headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|p| p.split(';').next().is_some_and(|s| s.trim().eq_ignore_ascii_case("gzip"))))
+}
+
+fn compressible(ct: &str) -> bool {
+    let ct = ct.to_ascii_lowercase();
+    ct.starts_with("text/") || ct.contains("json") || ct.contains("xml") || ct.contains("javascript") || ct.contains("svg")
+}
+
+/// Gzip small text responses. Only bodies sent with a known small
+/// `Content-Length` are touched, so streaming git responses pass through
+/// untouched.
+pub async fn compress(req: Request, next: Next) -> Response {
+    let wanted = gzip_wanted(&req);
+    let res = next.run(req).await;
+    if !wanted || res.status() != StatusCode::OK {
+        return res;
+    }
+    let (mut parts, body) = res.into_parts();
+    if parts.headers.contains_key(header::CONTENT_ENCODING) {
+        return Response::from_parts(parts, body);
+    }
+    let ct = parts.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+    if !compressible(&ct) {
+        return Response::from_parts(parts, body);
+    }
+    let len = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .or_else(|| body.size_hint().exact().map(|n| n as usize));
+    let Some(len) = len else { return Response::from_parts(parts, body) };
+    if len < GZIP_MIN || len > GZIP_MAX {
+        return Response::from_parts(parts, body);
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, GZIP_MAX).await else {
+        return Response::from_parts(parts, Body::empty());
+    };
+    let mut enc = flate2::write::GzEncoder::new(Vec::with_capacity(bytes.len() / 2), flate2::Compression::new(6));
+    if std::io::Write::write_all(&mut enc, &bytes).is_err() {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    let Ok(packed) = enc.finish() else {
+        return Response::from_parts(parts, Body::from(bytes));
+    };
+    if packed.len() >= bytes.len() {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    parts.headers.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&packed.len().to_string()).unwrap_or(HeaderValue::from_static("0")));
+    parts.headers.append(header::VARY, HeaderValue::from_static("accept-encoding"));
+    Response::from_parts(parts, Body::from(packed))
 }

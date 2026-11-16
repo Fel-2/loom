@@ -2079,6 +2079,7 @@ dependencies = [
  "getrandom 0.4.3",
  "gix",
  "hmac",
+ "http-body",
  "libc",
  "maud",
  "pulldown-cmark",

@@ -386,6 +386,37 @@ struct LogQ {
     page: Option<usize>,
 }
 
+async fn commits_alias(
+    State(app): St,
+    Viewer(v): Viewer,
+    Path((owner, name)): Path<(String, String)>,
+    uri: axum::http::Uri,
+) -> Res {
+    let ctx = Ctx::load(&app, v, &owner, &name)?;
+    let base = ctx.base();
+    let rev = blocking(move || {
+        let repo = ctx.open()?;
+        git::default_branch(&repo).ok_or(Err::NotFound)
+    })
+    .await?;
+    Ok(to_log(&base, &rev, &uri))
+}
+
+async fn commits_alias_rev(
+    State(app): St,
+    Viewer(v): Viewer,
+    Path((owner, name, rev)): Path<(String, String, String)>,
+    uri: axum::http::Uri,
+) -> Res {
+    let ctx = Ctx::load(&app, v, &owner, &name)?;
+    Ok(to_log(&ctx.base(), &rev, &uri))
+}
+
+fn to_log(base: &str, rev: &str, uri: &axum::http::Uri) -> Response {
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    Redirect::to(&format!("{base}/log/{}{query}", urlencode(rev))).into_response()
+}
+
 async fn log(
     State(app): St,
     Viewer(v): Viewer,
@@ -1393,6 +1424,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/raw/{*rest}", get(raw))
         .route("/{owner}/{name}/blame/{*rest}", get(blame))
         .route("/{owner}/{name}/log/{*rev}", get(log))
+        .route("/{owner}/{name}/commits", get(commits_alias))
+        .route("/{owner}/{name}/commits/{*rev}", get(commits_alias_rev))
         .route("/{owner}/{name}/graph/{*rev}", get(graph))
         .route("/{owner}/{name}/commit/{rev}", get(commit))
         .route("/{owner}/{name}/refs", get(refs))
@@ -1421,5 +1454,6 @@ pub fn router(app: Arc<App>) -> Router {
         .layer(middleware::from_fn(same_origin))
         .layer(middleware::from_fn_with_state(app.clone(), crate::ops::count))
         .layer(middleware::from_fn_with_state(app.clone(), crate::ops::rate_limit))
+        .layer(middleware::from_fn(crate::ops::compress))
         .with_state(app)
 }

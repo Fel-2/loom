@@ -269,6 +269,21 @@ pub fn escape(s: &str) -> String {
     o
 }
 
+fn url_scheme_ok(url: &str) -> bool {
+    let cleaned: String = url.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
+    if cleaned.starts_with(['/', '#', '?', '.']) {
+        return true;
+    }
+    match cleaned.split_once(':') {
+        None => true,
+        Some((scheme, _)) => matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "mailto" | "ftp"),
+    }
+}
+
+fn safe_dest(url: pulldown_cmark::CowStr<'_>) -> pulldown_cmark::CowStr<'_> {
+    if url_scheme_ok(&url) { url } else { pulldown_cmark::CowStr::from("#") }
+}
+
 /// Markdown with raw HTML neutralized and references linked (outside code
 /// and existing links).
 pub fn markdown_refs(src: &str, r: &dyn Resolve) -> Markup {
@@ -283,7 +298,15 @@ pub fn markdown_refs(src: &str, r: &dyn Resolve) -> Markup {
             Event::Html(h) | Event::InlineHtml(h) => events.push(Event::Text(h)),
             Event::Start(t @ (Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. })) => {
                 depth += 1;
-                events.push(Event::Start(t));
+                events.push(Event::Start(match t {
+                    Tag::Link { link_type, dest_url, title, id } => {
+                        Tag::Link { link_type, dest_url: safe_dest(dest_url), title, id }
+                    }
+                    Tag::Image { link_type, dest_url, title, id } => {
+                        Tag::Image { link_type, dest_url: safe_dest(dest_url), title, id }
+                    }
+                    other => other,
+                }));
             }
             Event::End(t @ (TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image)) => {
                 depth = depth.saturating_sub(1);
@@ -1064,5 +1087,27 @@ pub fn team_page(org: &Owner, team: &TeamRow, members: &[Member], repos: &[(Stri
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_safe_urls() {
+        for ok in ["https://a/b", "http://a", "mailto:a@b", "ftp://h/f", "/x/y", "./x", "#frag", "?q=1"] {
+            assert!(url_scheme_ok(ok), "unexpectedly blocked: {ok}");
+        }
+        for bad in ["javascript:alert(1)", " JaVaScRiPt:alert(1)", "java\tscript:alert(1)", "data:text/html,x", "vbscript:x", "file:///etc/passwd", "a:b"] {
+            assert!(!url_scheme_ok(bad), "unexpectedly allowed: {bad}");
+        }
+    }
+
+    #[test]
+    fn markdown_drops_unsafe_links() {
+        let out = markdown_refs("[a](javascript:alert(1)) [b](https://ok.test/)", &NoRefs).into_string();
+        assert!(!out.contains("javascript:"), "{out}");
+        assert!(out.contains("https://ok.test/"), "{out}");
     }
 }
