@@ -15,6 +15,7 @@ usage: loom [serve]
        loom repo create <owner>/<name> [--private] [--desc <text>]
        loom repo adopt        register bare repos already on disk (public)
        loom repo list
+       loom repo maintain     write commit-graphs for all repos (speeds up history)
        loom org create <name> <admin-user>
        loom org add <org> <user> [read|write|admin]
 
@@ -82,6 +83,7 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
         ("repo", Some("create")) => repo_create(&app, rest),
         ("repo", Some("adopt")) => repo_adopt(&app),
         ("repo", Some("list")) => repo_list(&app),
+        ("repo", Some("maintain")) => repo_maintain(&app),
         ("org", Some("create")) => org_create(&app, rest),
         ("org", Some("add")) => org_add(&app, rest),
         _ => Err(USAGE.into()),
@@ -262,6 +264,18 @@ fn repo_adopt(app: &App) -> Result<(), String> {
         }
     }
     println!("{n} repositories adopted");
+    Ok(())
+}
+
+fn repo_maintain(app: &App) -> Result<(), String> {
+    let admin = db::User { id: 0, name: String::new(), email: String::new(), is_admin: true, unread: 0 };
+    for r in app.db.visible_repos(Some(&admin), None).map_err(|e| e.to_string())? {
+        let t = std::time::Instant::now();
+        match crate::gitops::write_commit_graph(&app.repo_dir(&r)) {
+            Ok(()) => println!("{}/{}: commit-graph ok ({} ms)", r.owner, r.name, t.elapsed().as_millis()),
+            Err(e) => eprintln!("{}/{}: {e}", r.owner, r.name),
+        }
+    }
     Ok(())
 }
 

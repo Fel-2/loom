@@ -53,6 +53,7 @@ pub fn head(h: &HeadInfo<'_>, tab: PrTab) -> Markup {
     }
 }
 
+#[derive(Clone)]
 pub enum Mergeable {
     Clean,
     FastForward,

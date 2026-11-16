@@ -120,3 +120,5 @@ Backup = copy `loom.db` (via `.backup`) + `repos/`.
    First run (2026-11-16, Forgejo 15.0.6 + SQLite, same data): idle 16.6 vs
    239 MB, after load 16.9 vs 305 MB, peak under 32 clients 87.5 vs 354 MB
    (988 MB with Forgejo's git children), 1 vs 43–104 threads, 564 vs 49 req/s.
+   After fixes (handle cache, PR summary cache, git log for path history):
+   1,176 req/s at the same 4 threads; private memory under load 11 MB.

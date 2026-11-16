@@ -61,6 +61,11 @@ pub fn after_update(db: &Db, data: &Path, url: &str, repo: &Repo, pusher: Option
     let head = default_ref(&dir);
     let actor = pusher.map(|u| u.id);
     let bus = crate::events::Bus { db, url };
+    if updates.iter().any(|u| u.refname.starts_with("refs/heads/") && !zero(&u.new)) {
+        if let Err(e) = gitops::write_commit_graph(&dir) {
+            eprintln!("loom: commit-graph: {e}");
+        }
+    }
     for u in updates {
         if u.refname.starts_with("refs/heads/") || u.refname.starts_with("refs/tags/") {
             let commits = pushed_commits(&dir, &u.old, &u.new);

@@ -43,6 +43,13 @@ async fn trim_heap_periodically() {
     }
 }
 
+/// Blocking threads for git work (LOOM_GIT_THREADS, default 4). Measured: more
+/// threads buy little throughput but cost ~15 MB peak each under load and slow
+/// the cheap pages (bench/results/SUMMARY.md), so the default stays small.
+fn git_threads() -> usize {
+    std::env::var("LOOM_GIT_THREADS").ok().and_then(|v| v.parse().ok()).filter(|n: &usize| (1..=256).contains(n)).unwrap_or(4)
+}
+
 fn main() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     limit_malloc_arenas();
@@ -69,11 +76,13 @@ fn main() {
         std::process::exit(1);
     }
 
-    // One async thread; git work goes to a small, bounded blocking pool.
+    // One async thread; git work goes to a bounded blocking pool whose
+    // threads exit after 10 s idle, so idle stays at one thread.
+    let git_threads = git_threads();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
-        .max_blocking_threads(4)
+        .max_blocking_threads(git_threads)
         .thread_keep_alive(std::time::Duration::from_secs(10))
         .build()
         .expect("runtime");
@@ -86,7 +95,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        eprintln!("loom http on {}  (public url {}, data {})", app.http_addr, app.url, app.data.display());
+        eprintln!("loom http on {}  (public url {}, data {}, git threads {git_threads})", app.http_addr, app.url, app.data.display());
 
         if let Some(addr) = app.ssh_addr.clone() {
             let app = app.clone();

@@ -18,8 +18,12 @@ L=http://127.0.0.1:3917
 F=http://127.0.0.1:3918
 SHA=$(git -c credential.helper= ls-remote $L/git/git.git refs/heads/master | cut -f1)
 LPID=$(pgrep -x loom)
-FPID=$(docker top forgejo-bench -eo pid,args | awk '/(gitea|forgejo) web/ && !/awk/ {print $1; exit}')
-[ -n "$LPID" ] && [ -n "$FPID" ] || { echo "need loom and forgejo-bench running"; exit 1; }
+FPID=$(docker top forgejo-bench -eo pid,args 2>/dev/null | awk '/(gitea|forgejo) web/ && !/awk/ {print $1; exit}')
+if [ "${ONLY:-}" = loom-load ]; then
+  [ -n "$LPID" ] || { echo "need loom running"; exit 1; }
+else
+  [ -n "$LPID" ] && [ -n "$FPID" ] || { echo "need loom and forgejo-bench running"; exit 1; }
+fi
 
 # label <TAB> url — same page on each side.
 cat > $D/loom.tsv <<T
@@ -83,6 +87,12 @@ bench() { # name pid urls base
   echo "## concurrent clones over HTTP";   clones $base $pid
   echo "## after clones: settle 70 s, then idle (10 s)"; sleep 70; $LG idle --pid $pid --secs 10
 }
+
+if [ "${ONLY:-}" = loom-load ]; then
+  # Quick loom-only load phase (no Forgejo needed), for tuning.
+  $LG run --urls $D/loom.tsv --conc $CONC --reps $REPS --warmup 1 --pid $LPID
+  exit 0
+fi
 
 if [ "${ONLY:-}" = clones ]; then
   echo "## clones only — $(date -Is)"

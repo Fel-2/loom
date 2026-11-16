@@ -145,10 +145,34 @@ pub fn fix_head(dir: &Path) {
     }
 }
 
+/// Open a repo, reusing a handle cached on this thread (config, refs store,
+/// pack indexes load once per repo per worker thread, not per request).
+/// Worker threads exit after 10 s idle, taking their cache with them, so idle
+/// memory is unaffected. Handles see new pushes: refs are read from disk and
+/// the object store rescans packs on a miss. An entry is dropped when the
+/// directory was replaced (rename/delete/recreate changes its inode).
 pub fn open(path: &Path) -> Result<gix::Repository> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+    const MAX_CACHED: usize = 16;
+    thread_local! {
+        static CACHE: RefCell<HashMap<std::path::PathBuf, (u64, gix::Repository)>> = RefCell::new(HashMap::new());
+    }
+    let ino = std::fs::metadata(path).map_err(|_| Error::NotFound)?.ino();
+    if let Some(r) = CACHE.with(|c| c.borrow().get(path).filter(|(i, _)| *i == ino).map(|(_, r)| r.clone())) {
+        return Ok(r);
+    }
     let mut repo = gix::open(path)?;
     // Objects are read once per request; a small cache is plenty and keeps RSS low.
     repo.object_cache_size(Some(512 * 1024));
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= MAX_CACHED {
+            c.clear();
+        }
+        c.insert(path.to_path_buf(), (ino, repo.clone()));
+    });
     Ok(repo)
 }
 
@@ -201,6 +225,13 @@ fn commit_info(c: &gix::Commit<'_>) -> Result<CommitInfo> {
         time: author.time()?.seconds,
         parents: c.parent_ids().map(|p| p.detach()).collect(),
     })
+}
+
+/// Tip of `refs/heads/<branch>` via gix (no subprocess).
+pub fn branch_tip(dir: &Path, branch: &str) -> Option<ObjectId> {
+    let repo = open(dir).ok()?;
+    let mut r = repo.try_find_reference(format!("refs/heads/{branch}").as_str()).ok()??;
+    Some(r.peel_to_commit().ok()?.id)
 }
 
 pub fn parse_id(hex: &str) -> Option<ObjectId> {
@@ -281,6 +312,14 @@ pub fn readme(repo: &gix::Repository, id: ObjectId, dir: &str) -> Option<(String
 /// Commits reachable from `id`, newest first. If `path` is set, only commits
 /// touching it (compared against first parent).
 pub fn log(repo: &gix::Repository, id: ObjectId, path: &str, skip: usize, limit: usize) -> Result<Vec<CommitInfo>> {
+    if !path.is_empty() {
+        // git's own path-limited log uses changed-path Bloom filters.
+        return crate::gitops::path_log(repo.git_dir(), &id.to_string(), path, skip, limit)
+            .iter()
+            .filter_map(|h| parse_id(h))
+            .map(|cid| commit(repo, cid))
+            .collect();
+    }
     let walk = repo
         .rev_walk([id])
         .sorting(gix::revision::walk::Sorting::ByCommitTime(Default::default()))

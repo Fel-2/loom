@@ -107,10 +107,11 @@ check "duplicate milestone title -> 400"         is "$(post alice /$R/milestones
 echo "== labels page"
 check "bad color rejected"                       is "$(post alice /$R/labels -d "name=l$RUN" -d 'color=red;background:url(x)' -d description=)" 400
 check "create label"                             is "$(post alice /$R/labels -d "name=l$RUN" -d color=%23123abc -d description=test)" 200
-NL=$(page alice /$R/labels | grep -B3 "l$RUN" | grep -oE '/labels/[0-9]+"' | head -1 | grep -oE '[0-9]+')
+# The label's own edit form (pages are one line: grep -B/-A context is meaningless).
+NL=$(page alice /$R/labels | grep -oE "labels/[0-9]+\"><input name=\"name\" value=\"l$RUN\"" | grep -oE '[0-9]+' | head -1)
 check "duplicate label (case-insensitive) -> 400" is "$(post alice /$R/labels -d "name=L$RUN" -d color=%23123abc -d description=)" 400
 check "bob can't create labels -> 404"           is "$(post bob /$R/labels -d name=x -d color=%23000000 -d description=)" 404
-check "delete label"                             is "$(post alice /$R/labels/$NL/delete)" 200
+check "delete label (exactly that one)"          bash -c "[ -n '$NL' ] && [ \$(curl -s -o /dev/null -w '%{http_code}' -b $W/alice.jar -H 'Origin: $B' -X POST $B/$R/labels/$NL/delete) = 200 ] && ! curl -s $B/$R/labels | grep -q '>l$RUN<' && curl -s $B/$R/labels | grep -q '>bug<'"
 
 echo "== privacy"
 check "private issue 404 for bob"                is "$(get bob /alice/secret/issues/$SI)" 404

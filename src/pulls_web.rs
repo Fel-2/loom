@@ -65,32 +65,77 @@ struct Diff {
     files: Vec<crate::git::FileDiff>,
 }
 
-fn pr_diff(app: &App, ctx: &Ctx, issue_id: i64, pull: &Pull, with_files: bool) -> Diff {
-    let Some((base, head)) = diff_range(app, &ctx.dir, issue_id, pull) else {
-        return Diff { commits: Vec::new(), files: Vec::new() };
+/// Everything about a PR that only depends on (base tip, head): computed with
+/// several git subprocesses, so cached. The key changes whenever either side
+/// moves, so entries never go stale; the map is just bounded.
+#[derive(Clone)]
+struct Summary {
+    range: Option<(String, String)>,
+    commit_ids: Vec<String>,
+    files: usize,
+    mergeable: Mergeable,
+}
+
+fn summary(app: &App, ctx: &Ctx, issue_id: i64, pull: &Pull) -> Summary {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String, String), Summary>>> = OnceLock::new();
+    let base_key = if pull.merged {
+        format!("merged:{}", app.db.revisions(issue_id).ok().and_then(|r| r.last().map(|r| r.base_sha.clone())).unwrap_or_default())
+    } else {
+        gitops::branch_sha(&ctx.dir, &pull.base_branch).unwrap_or_default()
     };
+    let key = (ctx.dir.clone(), base_key, pull.head_sha.clone());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(s) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return s.clone();
+    }
+    let range = diff_range(app, &ctx.dir, issue_id, pull);
+    let (commit_ids, files) = match &range {
+        Some((base, head)) => {
+            let ids = gitops::rev_list(&ctx.dir, base, head, MAX_COMMITS);
+            let files = match (crate::git::open(&ctx.dir), crate::git::parse_id(base), crate::git::parse_id(head)) {
+                (Ok(repo), Some(b), Some(h)) => crate::git::diff_commits(&repo, Some(b), h).map(|f| f.len()).unwrap_or(0),
+                _ => 0,
+            };
+            (ids, files)
+        }
+        None => (Vec::new(), 0),
+    };
+    let mergeable = if pull.merged || pull.closed { Mergeable::Unknown(String::new()) } else { mergeable(&ctx.dir, pull) };
+    let s = Summary { range, commit_ids, files, mergeable };
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if c.len() >= 256 {
+        c.clear();
+    }
+    c.insert(key, s.clone());
+    s
+}
+
+fn pr_diff(app: &App, ctx: &Ctx, issue_id: i64, pull: &Pull, with_files: bool) -> Diff {
+    let s = summary(app, ctx, issue_id, pull);
     let Ok(repo) = crate::git::open(&ctx.dir) else { return Diff { commits: Vec::new(), files: Vec::new() } };
-    let commits = gitops::rev_list(&ctx.dir, &base, &head, MAX_COMMITS)
+    let commits = s
+        .commit_ids
         .iter()
-        .filter_map(|s| crate::git::parse_id(s))
+        .filter_map(|id| crate::git::parse_id(id))
         .filter_map(|id| crate::git::commit(&repo, id).ok())
         .rev()
         .collect();
-    let files = match (with_files, crate::git::parse_id(&base), crate::git::parse_id(&head)) {
-        (true, Some(b), Some(h)) => crate::git::diff_commits(&repo, Some(b), h).unwrap_or_default(),
+    let files = match (with_files, &s.range) {
+        (true, Some((base, head))) => match (crate::git::parse_id(base), crate::git::parse_id(head)) {
+            (Some(b), Some(h)) => crate::git::diff_commits(&repo, Some(b), h).unwrap_or_default(),
+            _ => Vec::new(),
+        },
         _ => Vec::new(),
     };
     Diff { commits, files }
 }
 
-fn files_count(app: &App, ctx: &Ctx, issue_id: i64, pull: &Pull) -> usize {
-    pr_diff(app, ctx, issue_id, pull, true).files.len()
-}
-
 fn head_markup(app: &App, ctx: &Ctx, issue: &Issue, pull: &Pull, tab: PrTab, diff: &Diff) -> maud::Markup {
     let h = head_info(app, ctx, pull);
     let revisions = app.db.revisions(issue.id).map(|r| r.len()).unwrap_or(0);
-    let files = if diff.files.is_empty() && !diff.commits.is_empty() { files_count(app, ctx, issue.id, pull) } else { diff.files.len() };
+    let files = if diff.files.is_empty() { summary(app, ctx, issue.id, pull).files } else { diff.files.len() };
     let base = ctx.base();
     uip::head(&uip::HeadInfo { base: &base, issue, pull, head_label: &h.label, commits: diff.commits.len(), files, revisions }, tab)
 }
@@ -179,7 +224,7 @@ pub fn render_pull(app: &Arc<App>, ctx: &Ctx, issue: Issue, msg: Option<&str>, e
     let can_delete_branch = head.repo.as_ref().is_some_and(|r| {
         app.db.access(viewer, r).is_ok_and(|a| a >= Access::Write) && !(r.id == ctx.repo.id && pull.head_branch == pull.base_branch)
     });
-    let state = if issue.closed { Mergeable::Unknown(String::new()) } else { mergeable(&ctx.dir, &pull) };
+    let state = if issue.closed { Mergeable::Unknown(String::new()) } else { summary(app, ctx, issue.id, &pull).mergeable };
     let (statuses, required, failing) = failing_checks(app, &ctx.repo, &pull);
     let blocked = if !failing.is_empty() {
         Some(format!("Required checks must pass first: {}.", failing.join(", ")))

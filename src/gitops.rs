@@ -65,7 +65,17 @@ pub fn rev_parse(dir: &Path, rev: &str) -> Option<String> {
 }
 
 pub fn branch_sha(dir: &Path, branch: &str) -> Option<String> {
-    rev_parse(dir, &format!("refs/heads/{branch}"))
+    if branch.starts_with('-') {
+        return None;
+    }
+    crate::git::branch_tip(dir, branch).map(|id| id.to_string())
+}
+
+/// Incremental commit-graph (with changed-path Bloom filters): speeds up
+/// history walks and path-filtered logs. Cheap when little changed.
+pub fn write_commit_graph(dir: &Path) -> Result<(), String> {
+    let o = out(git(dir).args(["commit-graph", "write", "--reachable", "--split", "--changed-paths"]).output())?;
+    if o.status.success() { Ok(()) } else { Err(stderr(&o)) }
 }
 
 pub fn merge_base(dir: &Path, a: &str, b: &str) -> Option<String> {
@@ -214,4 +224,21 @@ pub fn grep(dir: &Path, rev: &str, needle: &str, max: usize) -> Vec<(String, u32
         })
         .take(max)
         .collect()
+}
+
+/// Commits touching `path` (first-parent semantics like `git log -- path`),
+/// newest first. Uses commit-graph Bloom filters: ~10× faster than walking
+/// trees ourselves on large histories. Pathspec magic is disabled.
+pub fn path_log(dir: &Path, rev: &str, path: &str, skip: usize, limit: usize) -> Vec<String> {
+    if !is_sha(rev) || path.is_empty() {
+        return Vec::new();
+    }
+    let o = git(dir)
+        .arg("--literal-pathspecs")
+        .args(["log", "--format=%H", &format!("--skip={skip}"), "-n", &limit.to_string(), rev, "--", path])
+        .output();
+    match o {
+        Ok(o) if o.status.success() => stdout(&o).lines().filter(|l| is_sha(l)).map(str::to_owned).collect(),
+        _ => Vec::new(),
+    }
 }
