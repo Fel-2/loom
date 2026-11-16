@@ -23,6 +23,10 @@ Tangled, whose code is MIT; no Tangled brand assets are used).
   after load once the periodic `malloc_trim` runs (1.7 MB of it heap; the rest
   is the mapped binary and pack files). Without trim it held at 27 MB (not a
   leak: flat across repeated load rounds).
+- loom M4 measured (+ issues, comments, labels, milestones, assignees,
+  references, post-receive commit linking): 9.3 MB idle, ~52 MB peak at 32
+  concurrent (mix incl. issue pages), 14.9 MB after load + trim. Issue list
+  and issue page render in < 1 ms.
 - No federation.
 - Git reads in-process via gitoxide (`gix`). Spawn `git` only for
   `upload-pack` / `receive-pack` (clone/fetch/push) and merges.
@@ -100,7 +104,7 @@ Backup = copy `loom.db` (via `.backup`) + `repos/`.
 1. ✅ **Browse** — serve a directory of bare repos: tree/blob/log/commit/diff/refs + README. The new UI.
 2. ✅ **Accounts + transport** (tests/smoke.sh) — users, sessions, SSH keys, embedded SSH, smart HTTP.
 3. **Repo management** — create/fork/settings/collaborators/orgs/visibility. ✅ (tests/m3.sh)
-4. **Issues**
+4. ✅ **Issues** (tests/m4.sh)
 5. **Pull requests**
 6. **Webhooks, statuses, API, search, notifications**
 7. **Benchmark harness vs Forgejo** (RSS idle/loaded, p50/p99 latency) — run early, run often.

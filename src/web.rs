@@ -17,7 +17,7 @@ use crate::app::{App, Login};
 use crate::db::{self, Access, Repo, User};
 use crate::{git, githttp, ui};
 
-type St = State<Arc<App>>;
+pub(crate) type St = State<Arc<App>>;
 
 const CSS: &str = include_str!("../static/style.css");
 const COOKIE: &str = "loom_session";
@@ -56,9 +56,9 @@ impl IntoResponse for Err {
     }
 }
 
-type Res = Result<Response, Err>;
+pub(crate) type Res = Result<Response, Err>;
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, Err> + Send + 'static) -> Result<T, Err> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, Err> + Send + 'static) -> Result<T, Err> {
     tokio::task::spawn_blocking(f).await.map_err(|e| Err::Internal(e.to_string()))?
 }
 
@@ -98,7 +98,7 @@ impl FromRequestParts<Arc<App>> for Authed {
     }
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => (b as char).to_string(),
@@ -147,22 +147,23 @@ fn is_full_sha(rev: &str) -> bool {
 
 // ---------- repo context ----------
 
-struct Ctx {
-    viewer: Option<User>,
-    repo: Repo,
-    dir: PathBuf,
+pub(crate) struct Ctx {
+    pub viewer: Option<User>,
+    pub repo: Repo,
+    pub access: Access,
+    pub dir: PathBuf,
     http: String,
     ssh: Option<String>,
-    meta: ui::Meta,
+    pub meta: ui::Meta,
 }
 
 impl Ctx {
-    fn load(app: &Arc<App>, viewer: Option<User>, owner: &str, name: &str) -> Result<Ctx, Err> {
+    pub fn load(app: &Arc<App>, viewer: Option<User>, owner: &str, name: &str) -> Result<Ctx, Err> {
         Self::load_with(app, viewer, owner, name, Access::Read)
     }
 
     /// Like `load`, but 404s unless the viewer has `need`.
-    fn load_with(app: &Arc<App>, viewer: Option<User>, owner: &str, name: &str, need: Access) -> Result<Ctx, Err> {
+    pub fn load_with(app: &Arc<App>, viewer: Option<User>, owner: &str, name: &str, need: Access) -> Result<Ctx, Err> {
         let name = name.strip_suffix(".git").unwrap_or(name);
         let repo = app.db.repo(owner, name)?.ok_or(Err::NotFound)?;
         let access = app.db.access(viewer.as_ref(), &repo)?;
@@ -188,8 +189,9 @@ impl Ctx {
             forks: app.db.fork_count(repo.id)?,
             parent,
             can_admin: access >= Access::Admin,
+            open_issues: app.db.open_count(repo.id, false)?,
         };
-        Ok(Ctx { viewer, repo, dir, http, ssh, meta })
+        Ok(Ctx { viewer, repo, access, dir, http, ssh, meta })
     }
 
     /// Hash of everything in the repo header that isn't a git id.
@@ -197,27 +199,27 @@ impl Ctx {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (&self.repo.owner, &self.repo.name, &self.repo.description, self.repo.private, self.repo.archived).hash(&mut h);
-        (self.meta.stars, self.meta.starred, self.meta.forks, &self.meta.parent, self.meta.can_admin).hash(&mut h);
+        (self.meta.stars, self.meta.starred, self.meta.forks, &self.meta.parent, self.meta.can_admin, self.meta.open_issues).hash(&mut h);
         h.finish()
     }
 
     fn etag(&self, headers: &HeaderMap, tag: String, body: impl FnOnce() -> Response) -> Response {
         etagged(headers, self.viewer.as_ref(), format!("{tag}-{:x}", self.version()), body)
     }
-    fn base(&self) -> String {
+    pub fn base(&self) -> String {
         format!("/{}/{}", self.repo.owner, self.repo.name)
     }
     fn clone(&self) -> ui::Clone<'_> {
         ui::Clone { http: &self.http, ssh: self.ssh.as_deref() }
     }
-    fn header(&self, tab: ui::Tab, rev: &str) -> Markup {
+    pub fn header(&self, tab: ui::Tab, rev: &str) -> Markup {
         ui::repo_header(&self.repo, &self.clone(), &self.meta, tab, rev)
     }
-    fn page(&self, title: &str, body: Markup) -> Response {
+    pub fn page(&self, title: &str, body: Markup) -> Response {
         let t = format!("{title}{}{}/{}", if title.is_empty() { "" } else { " · " }, self.repo.owner, self.repo.name);
         ui::page(&t, self.viewer.as_ref(), body).into_response()
     }
-    fn open(&self) -> Result<gix::Repository, Err> {
+    pub fn open(&self) -> Result<gix::Repository, Err> {
         Ok(git::open(&self.dir)?)
     }
 }
@@ -505,7 +507,7 @@ async fn logout(State(app): St, headers: HeaderMap) -> Res {
 
 // ---------- settings ----------
 
-fn see_other(to: &str) -> Response {
+pub(crate) fn see_other(to: &str) -> Response {
     Redirect::to(to).into_response()
 }
 
@@ -959,6 +961,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/{owner}/{name}/settings/rename", post(settings_rename))
         .route("/{owner}/{name}/settings/transfer", post(settings_transfer))
         .route("/{owner}/{name}/settings/delete", post(settings_delete))
+        .merge(crate::issues_web::routes())
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
         .with_state(app)

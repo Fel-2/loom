@@ -3,8 +3,12 @@ mod cli;
 mod db;
 mod git;
 mod githttp;
+mod issues_db;
+mod issues_web;
+mod refs;
 mod ssh;
 mod ui;
+mod ui_issues;
 mod web;
 
 use std::sync::Arc;

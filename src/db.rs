@@ -87,6 +87,98 @@ CREATE TABLE protected_branches (
 );
 ";
 
+/// v3: issues (shared numbering with PRs), comments, labels, milestones,
+/// assignees, timeline events. Existing repos get the default labels.
+const SCHEMA_V3: &str = "
+ALTER TABLE repos ADD COLUMN next_number INTEGER NOT NULL DEFAULT 1;
+CREATE TABLE milestones (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    due INTEGER,
+    closed INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL,
+    UNIQUE (repo_id, title)
+);
+CREATE TABLE issues (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    number INTEGER NOT NULL,
+    is_pr INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    closed INTEGER NOT NULL DEFAULT 0,
+    milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+    comments INTEGER NOT NULL DEFAULT 0,
+    created INTEGER NOT NULL,
+    updated INTEGER NOT NULL,
+    closed_at INTEGER,
+    UNIQUE (repo_id, number)
+);
+CREATE INDEX issues_list ON issues(repo_id, is_pr, closed, number DESC);
+CREATE TABLE comments (
+    id INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    updated INTEGER NOT NULL
+);
+CREATE INDEX comments_issue ON comments(issue_id, id);
+CREATE TABLE labels (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    name TEXT NOT NULL COLLATE NOCASE,
+    color TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    UNIQUE (repo_id, name)
+);
+CREATE TABLE issue_labels (
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    label_id INTEGER NOT NULL REFERENCES labels(id) ON DELETE CASCADE,
+    PRIMARY KEY (issue_id, label_id)
+);
+CREATE INDEX issue_labels_label ON issue_labels(label_id);
+CREATE TABLE issue_assignees (
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (issue_id, user_id)
+);
+CREATE INDEX issue_assignees_user ON issue_assignees(user_id);
+CREATE TABLE issue_events (
+    id INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL DEFAULT '',
+    created INTEGER NOT NULL,
+    ref_key TEXT UNIQUE
+);
+CREATE INDEX issue_events_issue ON issue_events(issue_id, id);
+INSERT INTO labels (repo_id, name, color, description)
+    SELECT r.id, d.name, d.color, d.description FROM repos r CROSS JOIN (
+        SELECT 'bug' AS name, '#d73a4a' AS color, 'Something is broken' AS description
+        UNION ALL SELECT 'enhancement', '#84b6eb', 'New feature or request'
+        UNION ALL SELECT 'question', '#cc317c', 'Needs more information'
+        UNION ALL SELECT 'documentation', '#0075ca', 'Docs only'
+        UNION ALL SELECT 'good first issue', '#7057ff', 'Good for newcomers'
+        UNION ALL SELECT 'duplicate', '#cfd3d7', 'Already reported'
+        UNION ALL SELECT 'wontfix', '#e4e669', 'Will not be worked on'
+    ) d;
+";
+
+pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
+    ("bug", "#d73a4a", "Something is broken"),
+    ("enhancement", "#84b6eb", "New feature or request"),
+    ("question", "#cc317c", "Needs more information"),
+    ("documentation", "#0075ca", "Docs only"),
+    ("good first issue", "#7057ff", "Good for newcomers"),
+    ("duplicate", "#cfd3d7", "Already reported"),
+    ("wontfix", "#e4e669", "Will not be worked on"),
+];
+
 pub const SESSION_DAYS: i64 = 30;
 
 /// Names that would collide with top-level routes.
@@ -259,10 +351,13 @@ impl Db {
         if v < 2 {
             c.execute_batch(&format!("BEGIN; {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"))?;
         }
+        if v < 3 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"))?;
+        }
         Ok(Db(Mutex::new(c)))
     }
 
-    fn c(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn c(&self) -> MutexGuard<'_, Connection> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -431,12 +526,18 @@ impl Db {
     // ---- repos ----
 
     pub fn create_repo(&self, owner: &str, name: &str, description: &str, private: bool) -> Result<i64> {
-        let c = self.c();
-        c.execute(
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute(
             "INSERT INTO repos (owner, name, description, private, created) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![owner, name, description, private, now()],
         )?;
-        Ok(c.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        for (n, color, d) in DEFAULT_LABELS {
+            tx.execute("INSERT INTO labels (repo_id, name, color, description) VALUES (?1, ?2, ?3, ?4)", params![id, n, color, d])?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn delete_repo(&self, id: i64) -> Result<()> {

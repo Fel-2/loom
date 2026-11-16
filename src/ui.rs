@@ -33,6 +33,13 @@ pub fn page(title: &str, viewer: Option<&User>, body: Markup) -> Markup {
     }
 }
 
+pub fn flash_box(err: Option<&str>, msg: Option<&str>) -> Markup {
+    html! {
+        @if let Some(e) = err { div.flash { (e) } }
+        @if let Some(m) = msg { div.card.notice { (m) } }
+    }
+}
+
 pub fn ago(t: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -78,6 +85,7 @@ pub enum Tab {
     Overview,
     Commits,
     Refs,
+    Issues,
     Settings,
 }
 
@@ -89,6 +97,7 @@ pub struct Meta {
     pub forks: i64,
     pub parent: Option<String>,
     pub can_admin: bool,
+    pub open_issues: i64,
 }
 
 pub struct Clone<'a> {
@@ -136,6 +145,7 @@ pub fn repo_header(repo: &Repo, clone: &Clone<'_>, meta: &Meta, tab: Tab, rev: &
                 a.active[tab == Tab::Overview] href=(base) { "overview" }
                 a.active[tab == Tab::Commits] href={ (base) "/log/" (rev) } { "commits" }
                 a.active[tab == Tab::Refs] href={ (base) "/refs" } { "branches & tags" }
+                a.active[tab == Tab::Issues] href={ (base) "/issues" } { "issues" @if meta.open_issues > 0 { span.tab-count { (meta.open_issues) } } }
                 @if meta.can_admin { a.active[tab == Tab::Settings] href={ (base) "/settings" } { "settings" } }
             }
         }
@@ -201,15 +211,85 @@ pub fn commit_rows(base: &str, commits: &[CommitInfo]) -> Markup {
 }
 
 pub fn markdown(src: &str) -> Markup {
-    use pulldown_cmark::{html::push_html, Event, Options, Parser};
+    markdown_refs(src, &NoRefs)
+}
+
+/// Resolves reference tokens to links. Return `None` to leave the text as is
+/// (unknown target, or the viewer can't see it).
+pub trait Resolve {
+    fn link(&self, t: &crate::refs::Token) -> Option<RefLink>;
+}
+
+pub struct RefLink {
+    pub href: String,
+    pub title: String,
+    pub class: &'static str,
+}
+
+struct NoRefs;
+impl Resolve for NoRefs {
+    fn link(&self, _: &crate::refs::Token) -> Option<RefLink> {
+        None
+    }
+}
+
+pub fn escape(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            '\'' => o.push_str("&#39;"),
+            c => o.push(c),
+        }
+    }
+    o
+}
+
+/// Markdown with raw HTML neutralized and references linked (outside code
+/// and existing links).
+pub fn markdown_refs(src: &str, r: &dyn Resolve) -> Markup {
+    use crate::refs::{scan, Segment};
+    use pulldown_cmark::{html::push_html, CowStr, Event, Options, Parser, Tag, TagEnd};
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    // Raw HTML in READMEs is rendered as text: no sanitizer dependency, no XSS.
-    let events = Parser::new_ext(src, opts).map(|e| match e {
-        Event::Html(h) | Event::InlineHtml(h) => Event::Text(h),
-        e => e,
-    });
+    let mut depth = 0usize;
+    let mut events: Vec<Event<'_>> = Vec::new();
+    for e in Parser::new_ext(src, opts) {
+        match e {
+            // Raw HTML in user content is rendered as text: no sanitizer, no XSS.
+            Event::Html(h) | Event::InlineHtml(h) => events.push(Event::Text(h)),
+            Event::Start(t @ (Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. })) => {
+                depth += 1;
+                events.push(Event::Start(t));
+            }
+            Event::End(t @ (TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image)) => {
+                depth = depth.saturating_sub(1);
+                events.push(Event::End(t));
+            }
+            Event::Text(t) if depth == 0 => {
+                for seg in scan(&t) {
+                    match seg {
+                        Segment::Ref(tok, raw) => match r.link(&tok) {
+                            Some(l) => events.push(Event::InlineHtml(CowStr::from(format!(
+                                "<a class=\"{}\" href=\"{}\" title=\"{}\">{}</a>",
+                                l.class,
+                                escape(&l.href),
+                                escape(&l.title),
+                                escape(raw)
+                            )))),
+                            None => events.push(Event::Text(CowStr::from(raw.to_owned()))),
+                        },
+                        Segment::Text(x) => events.push(Event::Text(CowStr::from(x.to_owned()))),
+                    }
+                }
+            }
+            e => events.push(e),
+        }
+    }
     let mut out = String::with_capacity(src.len() * 3 / 2);
-    push_html(&mut out, events);
+    push_html(&mut out, events.into_iter());
     PreEscaped(out)
 }
 

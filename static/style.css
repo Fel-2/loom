@@ -162,3 +162,58 @@ select { font: inherit; font-size: .9rem; padding: .35rem .5rem; border: 1px sol
 .prefixed select { width: auto; }
 .owner-head { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap; margin-bottom: .5rem; }
 .owner-head .page-title { margin-bottom: .25rem; }
+
+/* issues */
+.tab-count { font-size: .75rem; background: var(--pill); border-radius: 999px; padding: 0 .45rem; margin-left: .35rem; }
+.issue-bar { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .75rem; }
+nav.seg { display: inline-flex; border: 1px solid var(--line); border-radius: .4rem; overflow: hidden; background: var(--card); }
+nav.seg a { padding: .3rem .8rem; font-size: .85rem; color: var(--muted); }
+nav.seg a.active { color: var(--fg); background: var(--hover); font-weight: 600; }
+nav.seg a:hover { text-decoration: none; color: var(--fg); }
+.filter-chip { font-family: var(--mono); font-size: .8rem; border: 1px dashed var(--line); border-radius: 999px; padding: .1rem .6rem; color: var(--muted); }
+ul.issues { list-style: none; margin: 0; padding: 0; }
+ul.issues li { display: flex; gap: .75rem; align-items: flex-start; padding: .65rem 1rem; border-bottom: 1px solid var(--line); }
+ul.issues li:last-child { border-bottom: 0; }
+ul.issues li:hover { background: var(--hover); }
+.issue-main { flex: 1; min-width: 0; }
+.issue-title { font-weight: 600; }
+.state { font-size: .85rem; line-height: 1.6; width: 1rem; text-align: center; }
+.state.open { color: var(--add-fg); } .state.closed { color: #8250df; }
+.comments { font-size: .8rem; color: var(--muted); white-space: nowrap; }
+.label { display: inline-block; font-size: .72rem; font-weight: 600; line-height: 1.5; padding: 0 .5rem; border-radius: 999px; vertical-align: middle; }
+a.label:hover { text-decoration: none; filter: brightness(.95); }
+.pill { font-size: .8rem; font-weight: 600; padding: .15rem .7rem; border-radius: 999px; }
+.pill.open { background: var(--add); color: var(--add-fg); } .pill.closed { background: #f0e7ff; color: #8250df; }
+@media (prefers-color-scheme: dark) { .pill.closed { background: #2a1f3d; color: #c4a5ff; } .state.closed { color: #c4a5ff; } }
+.issue-head h2 { margin: .25rem 0 .4rem; font-size: 1.35rem; font-weight: 600; }
+.issue-head { margin-bottom: 1rem; }
+.timeline { gap: .75rem; }
+.comment .card-head { font-weight: 400; background: var(--hover); }
+.comment .card-head .who { font-weight: 600; }
+.comment .prose { padding: .75rem 1.25rem; }
+.prose > :first-child { margin-top: 0; } .prose > :last-child { margin-bottom: 0; }
+.event { font-size: .85rem; padding: .1rem 0 .1rem 1.25rem; position: relative; }
+.event .dot { position: absolute; left: .3rem; top: .55rem; width: .45rem; height: .45rem; border-radius: 50%; background: var(--line); }
+.event .who { font-weight: 600; }
+details.edit { position: relative; }
+details.edit summary { list-style: none; cursor: pointer; color: var(--muted); font-size: .85rem; }
+details.edit summary::-webkit-details-marker { display: none; }
+details.edit[open] > form { position: absolute; right: 0; top: 1.6rem; z-index: 3; width: min(36rem, 80vw); background: var(--card); border: 1px solid var(--line); border-radius: .5rem; padding: .75rem; box-shadow: 0 6px 24px rgb(0 0 0 / .1); }
+textarea.body { font-family: var(--mono); font-size: .85rem; min-height: 6rem; resize: vertical; }
+.row { display: flex; gap: .5rem; }
+.sidebar h4 { margin: 0 0 .5rem; font-size: .8rem; text-transform: lowercase; color: var(--muted); font-weight: 600; letter-spacing: .02em; }
+.sidebar .card { padding: .8rem 1rem; }
+.side-row { display: flex; justify-content: space-between; align-items: center; font-size: .9rem; }
+.side-form { display: flex; gap: .4rem; margin-top: .5rem; }
+.side-form input, .side-form select { flex: 1; min-width: 0; }
+.label-pick { display: flex; flex-direction: column; gap: .3rem; }
+.label-pick label.check { display: flex; gap: .4rem; align-items: center; }
+.label-pick label.check input { width: auto; }
+.label-pick button { align-self: flex-start; margin-top: .3rem; }
+.chips { display: flex; flex-wrap: wrap; gap: .25rem; }
+a.ref { font-weight: 600; } a.ref-closed { color: #8250df; } a.mention { font-weight: 600; }
+a.ref.sha { font-family: var(--mono); font-size: .85em; font-weight: 400; background: var(--pill); padding: 0 .3rem; border-radius: .25rem; }
+.progress { height: .4rem; background: var(--pill); border-radius: 999px; overflow: hidden; margin: .4rem 0 .2rem; max-width: 24rem; }
+.progress div { height: 100%; background: var(--add-fg); }
+li.milestone { align-items: flex-start; }
+input[type=color] { width: 2.5rem; height: 2rem; padding: .1rem; flex: 0 0 auto !important; min-width: 0 !important; }

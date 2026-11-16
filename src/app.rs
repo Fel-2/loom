@@ -230,11 +230,13 @@ impl App {
         use std::os::unix::fs::PermissionsExt;
         let dir = self.data.join("hooks");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let path = dir.join("pre-receive");
-        let script = "#!/bin/sh\nexec \"$LOOM_BIN\" hook pre-receive\n";
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(script) {
-            std::fs::write(&path, script).map_err(|e| e.to_string())?;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        for hook in ["pre-receive", "post-receive"] {
+            let path = dir.join(hook);
+            let script = format!("#!/bin/sh\nexec \"$LOOM_BIN\" hook {hook}\n");
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
+                std::fs::write(&path, &script).map_err(|e| e.to_string())?;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+            }
         }
         Ok(())
     }
