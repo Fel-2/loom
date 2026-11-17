@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build a portable tarball: statically linked binary + installer + user unit.
 # Needs podman (the image has the Rust toolchain); the result runs on any
-# x86_64 Linux without a Rust install or matching glibc. Set PODMAN=... to
-# use a different container engine that understands `build/create/cp/rm`.
+# $ARCH Linux without a Rust install or matching glibc. Set PODMAN=... to
+# use a different container engine, ARCH=aarch64 for 64-bit ARM (needs
+# qemu/binfmt, which distro containers register automatically).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -15,8 +16,8 @@ mkdir -p "$OUT/deploy"
 PODMAN=${PODMAN:-podman}
 command -v "$PODMAN" >/dev/null || { echo "need $PODMAN to build the portable binary (or set PODMAN=...)"; exit 1; }
 
-echo "building static binary ($PODMAN)..."
-"$PODMAN" build -q -f Dockerfile.dist -t "loom-dist:$VERSION" . >/dev/null
+echo "building static binary for $ARCH ($PODMAN)..."
+"$PODMAN" build -q --platform "linux/$ARCH" -f Dockerfile.dist -t "loom-dist:$VERSION" . >/dev/null
 cid=$("$PODMAN" create "loom-dist:$VERSION")
 "$PODMAN" cp "$cid:/src/target/release/loom" "$OUT/loom" >/dev/null
 "$PODMAN" rm "$cid" >/dev/null

@@ -41,7 +41,7 @@ Uncontended (1 client), p50:
 | API: issues | 0.29 ms | 10.3 ms | |
 | repo home | 1.8 ms | 72 ms | ⚠ Forgejo also shows last commit per entry |
 | tree dir | 1.3 ms | 1,039 ms | ⚠ same: last commit per file (expensive) |
-| blob `diff.c` | 3.6 ms | 334 ms | ⚠ Forgejo syntax-highlights; loom doesn't yet |
+| blob `diff.c` | 3.6 ms | 334 ms | ⚠ Forgejo syntax-highlights; loom does too now (see note below) |
 | raw file | 1.8 ms | 13.6 ms | identical bytes |
 | log | 2.3 ms | 38 ms | |
 | log page 50 | 22 ms | 50 ms | |
@@ -54,9 +54,12 @@ Pages are also much smaller on loom (e.g. repo home 63 KB vs 787 KB, issue
 4.8 KB vs 199 KB).
 
 **Not apples to apples** (⚠): Forgejo computes the last commit touching each
-file in tree views and highlights source; loom does neither yet. Those rows show
-the cost of features loom lacks as much as the cost of the implementation. The
-issue/API/raw/log rows are like for like.
+file in tree views; loom does not (it is opt-in per repository). The tree
+rows show the cost of that feature as much as the cost of the implementation.
+loom **does** highlight source now (added after this table ran, milestone 8):
+re-measured 2026-11-17 on the same host, blob `web.rs` (1,425 lines) renders
+at 4.2 ms p50 with highlighting on — 20 samples, live server, cold cache
+warmed. The issue/API/raw/log rows are like for like.
 
 ## Clones (8× ytm-tui + 2× git/git, concurrent, HTTP)
 
