@@ -1,6 +1,6 @@
 # API, webhooks and LFS
 
-Everything here is stable as of 0.1.0 unless a line says otherwise. There is no
+Everything here is stable as of 0.2.0 unless a line says otherwise. There is no
 version-negotiation header: the base path is `/api/v1`.
 
 ## Authentication

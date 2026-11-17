@@ -38,16 +38,16 @@ On the machine where you develop loom:
 
 ```sh
 ./scripts/dist.sh
-# -> dist/loom-0.1.0-linux-x86_64.tar.gz  (statically linked, ~14 MB)
+# -> dist/loom-*-linux-x86_64.tar.gz  (statically linked, ~14 MB)
 ```
 
 The binary is built for musl in a container (podman by default), so it does
 not care which glibc the laptop has. Copy it over:
 
 ```sh
-scp dist/loom-0.1.0-linux-x86_64.tar.gz laptop:~
+scp dist/loom-*-linux-x86_64.tar.gz laptop:~
 # or a USB stick
-ssh laptop 'tar xzf loom-0.1.0-linux-x86_64.tar.gz'
+ssh laptop 'tar xzf loom-*-linux-x86_64.tar.gz'
 ```
 
 ### Option B — build on the laptop
@@ -85,7 +85,7 @@ This is heavier than a plain binary; for an old laptop prefer option A.
 ## 3. Install
 
 ```sh
-cd loom-0.1.0-linux-x86_64
+cd loom-*-linux-x86_64
 ./deploy/install.sh
 ```
 
