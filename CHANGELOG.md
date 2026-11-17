@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+Migration and hardening pass after 0.1.0.
+
+- **Migration**: `scripts/import-forgejo.sh --issues --releases` now copies
+  labels, milestones, issues (with comments, state and PRs excluded),
+  and release notes from a Forgejo/Gitea instance through the loom API; the
+  script mints its own one-time token via the new `loom token add` CLI.
+  Numbering is per-instance, so issues are renumbered and the mapping is
+  printed. Tested in `tests/m10.sh` against a stub Gitea API.
+- **API v1 grown**: `PATCH` an issue (title/body/state/labels/milestone),
+  list comments, labels CRUD, milestones CRUD, releases CRUD, PR create
+  (drafts included) + merge, webhooks CRUD. Enough surface for a full
+  migration and for automation scripts.
+- **Draft pull requests**: mark a PR as a draft when opening it (web form or
+  API), merge is refused until it is marked ready; the author can flip back.
+- **Atom feeds**: `/atom.xml`, `/issues.atom.xml`, `/releases.atom.xml` per
+  repository, ETagged; private repos authenticate with a session cookie or
+  an API token (bad token = 401, never a silent downgrade).
+- **Reactions**: 👍 👎 😄 😕 ❤️ 🎉 🚀 👀 on issues and PRs, no-JS toggles.
+- **Security**: `Content-Security-Policy` on every response — the UI ships no
+  scripts, so everything is denied except the stylesheet, same-origin
+  images and forms (`SECURITY.md` gap closed).
+- **Portability**: `scripts/dist.sh` builds an aarch64 static tarball
+  (`ARCH=aarch64`), and CI builds both tarballs; the runtime container
+  image was already multi-arch.
+- **Operations**: `bench/guard.sh` fails the build if idle RSS after a load
+  burst exceeds its budget (runs in CI; measured 13 MB against a 32 MB
+  budget on the laptop).
+- **Tests**: unit tests for the access matrix (owner/collaborator/org/team/
+  admin over public and private repos); suite counts now
+  smoke 25 · m3 63 · m4 66 · m5 81 · m6 124 · m7 48 · m8 21 · m9 43 · m10 38.
+
 ## 0.1.0 — 2026-11-17
 
 First public release. One static binary, SQLite, git; no Redis, no job queue, no

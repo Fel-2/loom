@@ -66,8 +66,9 @@ Commits, and a single commit with its diff:
 - **Browse**: tree, blob (with a small built-in syntax highlighter), raw, log,
   path-limited history, commit + diff, branches & tags, blame, README rendering.
   Everything revalidates by ETag; raw files are cacheable forever by content.
-- **Accounts**: local users, argon2id passwords, sessions, SSH keys, API tokens,
-  optional TOTP two-factor (with `loom user 2fa-off` as recovery).
+- **Accounts**: local users, argon2id passwords, sessions, SSH keys, API tokens
+  (web UI or `loom token add`), optional TOTP two-factor (with
+  `loom user 2fa-off` as recovery).
 - **Orgs**: members with read/write/admin across the org's repositories.
 - **Transport**: embedded SSH server (no OpenSSH needed) and smart HTTP, both
   streaming into short-lived `git upload-pack`/`receive-pack` processes.
@@ -76,11 +77,12 @@ Commits, and a single commit with its diff:
   (moved to `data/trash/`, recoverable), forks (hardlinked), stars, watch.
 - **Pull mirrors**: periodic fetch from an upstream URL; mirrored repos are
   read-only.
-- **Issues & PRs**: shared numbering, labels, milestones, assignees, timeline;
-  `#12` / `owner/repo#12` / `@user` / sha references that only link when the
-  viewer may see the target; `Fixes #12` closes on merge or on push to the
-  default branch. PRs: fork heads, revisions per push with `git range-diff`,
-  reviews, no-JS inline comments, merge/squash/rebase, "merged by push".
+- **Issues & PRs**: shared numbering, labels, milestones, assignees, timeline,
+  emoji reactions; `#12` / `owner/repo#12` / `@user` / sha references that only
+  link when the viewer may see the target; `Fixes #12` closes on merge or on
+  push to the default branch. PRs: draft or ready, fork heads, revisions per
+  push with `git range-diff`, reviews, no-JS inline comments, merge/squash/
+  rebase, "merged by push".
 - **Git LFS**: batch API, uploads verified by SHA-256, `git-lfs-authenticate`
   over SSH so LFS works with SSH remotes too; storage under `data/lfs/`.
 - **Releases**: notes per tag, drafts and pre-release flags, uploaded assets
@@ -91,11 +93,17 @@ Commits, and a single commit with its diff:
 - **Extras**: deterministic identicon avatars (no external service), a commit
   graph view (`git log --graph`), opt-in "last commit" badges per repo
   (off by default: they cost ~1 s per large directory), per-IP rate limiting,
-  email notifications piped to your MTA, `loom lfs gc`.
+  email notifications piped to your MTA, `loom lfs gc`, Atom feeds for
+  commits, issues and releases (session cookie or API token — so feed
+  readers can follow private repos too), a `Content-Security-Policy` that
+  denies scripts outright, and OpenGraph tags for link previews.
 - **Integrations**: signed webhooks with retries and a delivery log, commit
   statuses API + combined status, REST API v1 with bearer tokens
-  ([docs/api.md](docs/api.md)), notifications, activity feed, full-text search
-  (issues/PRs/comments) and code search (`git grep`).
+  ([docs/api.md](docs/api.md) — issues, labels, milestones, releases, PR
+  create/merge, hooks), notifications, activity feed, full-text search
+  (issues/PRs/comments) and code search (`git grep`), and a Forgejo/Gitea
+  import script that also copies issues, labels, milestones and releases
+  ([scripts/import-forgejo.sh](scripts/import-forgejo.sh)).
 
 ## Run it
 
@@ -178,17 +186,18 @@ credential helper or GUI prompt is involved.
 ```sh
 tests/smoke.sh   # transport + permissions (25)
 tests/m3.sh      # repo management, orgs, protection, forks (63)
-tests/m4.sh      # issues, labels, milestones, references (65)
-tests/m5.sh      # pull requests, merges, revisions (71)
-tests/m6.sh      # webhooks, statuses, API, notifications, search (61)
+tests/m4.sh      # issues, labels, milestones, references (66)
+tests/m5.sh      # pull requests, revisions, drafts (81)
+tests/m6.sh      # webhooks, statuses, API, feeds, headers, reactions, search (124)
 tests/m7.sh      # highlighting, caps, blame, releases, 2FA, mirrors (48)
 tests/m8.sh      # LFS (real git-lfs), healthz, metrics, backup, version (21)
-tests/m9.sh      # templates, drafts, avatars, graph, teams, email, LFS gc, rate limits (42)
-tests/m10.sh     # doctor, backup rotation, restore round-trip, installer, static binary
-cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, ...)
+tests/m9.sh      # templates, drafts, avatars, graph, teams, email, LFS gc, rate limits (43)
+tests/m10.sh     # doctor, backup rotation, restore, installer, forgejo import, static binary (38)
+cargo test --release   # unit tests (TOTP, HMAC, tokenizer, highlighter, access matrix, ...)
 ```
 
-`bench/` holds the Forgejo comparison harness.
+`bench/` holds the Forgejo comparison harness, and `bench/guard.sh` (run in
+CI) fails the build if loom's idle RSS outgrows its budget.
 
 ## Not implemented
 
