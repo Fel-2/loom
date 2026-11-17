@@ -9,7 +9,7 @@ KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 DATA=${LOOM_DATA:-$ROOT/data}
 LOOM=${LOOM:-$ROOT/target/release/loom}
-W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m3.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/tmp}/loom-m3.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 cd "$W" || exit 1
 

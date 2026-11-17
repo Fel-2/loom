@@ -14,7 +14,7 @@ RUN=$$
 REPO=t9r$RUN
 R=alice/$REPO
 ORG=acme$RUN
-W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m9.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/tmp}/loom-m9.XXXXXX")
 post() { local who=$1 path=$2; shift 2; curl -s -X POST -o "$W/last.html" -w '%{http_code}' -b "$W/$who.jar" -H "Origin: $B" "$@" "$B$path"; }
 getc() { curl -s -o "$W/last.html" -w '%{http_code}' -b "$W/$1.jar" "$B$2"; }
 page() { curl -s -b "$W/$1.jar" "$B$2"; }

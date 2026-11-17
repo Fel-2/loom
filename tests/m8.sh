@@ -12,7 +12,7 @@ GITLFS=${GITLFS:-$HOME/.cache/loom-bench/bin}
 RUN=$$
 REPO=lfs$RUN
 R=alice/$REPO
-W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m8.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/tmp}/loom-m8.XXXXXX")
 post() { local who=$1 path=$2; shift 2; curl -s -X POST -o "$W/last.html" -w '%{http_code}' -b "$W/$who.jar" -H "Origin: $B" "$@" "$B$path"; }
 cleanup() { post alice /$R/settings/delete -d confirm=$R >/dev/null 2>&1; rm -rf "$W"; }
 trap cleanup EXIT

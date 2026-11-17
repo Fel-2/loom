@@ -7,7 +7,7 @@ B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 DATA=${LOOM_DATA:-$ROOT/data}
 LOOM=${LOOM:-$ROOT/target/release/loom}
-W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m10.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/tmp}/loom-m10.XXXXXX")
 SRV=
 cleanup() { [ -n "$SRV" ] && kill "$SRV" 2>/dev/null; rm -rf "$W"; }
 trap cleanup EXIT

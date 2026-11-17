@@ -14,7 +14,7 @@ REPO=m7r$RUN
 SRC=m7s$RUN
 MIR=m7m$RUN
 R=alice/$REPO
-W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-m7.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/tmp}/loom-m7.XXXXXX")
 post() { local who=$1 path=$2; shift 2; curl -s -X POST -o "$W/last.html" -w '%{http_code}' -b "$W/$who.jar" -H "Origin: $B" "$@" "$B$path"; }
 cleanup() {
   for r in $R alice/$SRC alice/$MIR; do post alice /$r/settings/delete -d confirm=$r >/dev/null 2>&1; done

@@ -11,7 +11,7 @@ SSH_PORT=${LOOM_TEST_SSH_PORT:-2917}
 KEYS=${KEYS:-$HOME/.cache/loom-bench/keys}
 ROOT=${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 DATA=${LOOM_DATA:-$ROOT/data}
-W=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/loom-smoke.XXXXXX")
+W=$(mktemp -d "${TMPDIR:-/tmp}/loom-smoke.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 cd "$W" || exit 1
 
