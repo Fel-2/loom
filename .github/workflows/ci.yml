@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release
+      - name: unit tests
+        run: cargo test --release
+      - name: clippy
+        run: cargo clippy --all-targets
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: tools used by the suites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends git-lfs python3 sqlite3
+      - name: build
+        run: cargo build --release
+      - name: seed a throwaway instance
+        run: ./scripts/make-test-bundle.sh
+      - name: start it
+        run: |
+          cp -a dist/loom-project-0.1.0/test-data data-run
+          LOOM_DATA="$PWD/data-run" LOOM_ADDR=127.0.0.1:3917 LOOM_SSH_ADDR=127.0.0.1:2917 \
+            LOOM_URL=http://127.0.0.1:3917 LOOM_SSH_HOST=127.0.0.1:2917 \
+            dist/loom-project-0.1.0/loom serve >serve.log 2>&1 &
+          for _ in $(seq 60); do curl -sf http://127.0.0.1:3917/healthz >/dev/null && exit 0; sleep 0.5; done
+          echo "server did not come up"; cat serve.log; exit 1
+      - name: integration suites
+        env:
+          LOOM: ${{ github.workspace }}/dist/loom-project-0.1.0/loom
+          LOOM_DATA: ${{ github.workspace }}/data-run
+          LOOM_TEST_URL: http://127.0.0.1:3917
+          LOOM_TEST_SSH_PORT: "2917"
+          KEYS: ${{ github.workspace }}/dist/loom-project-0.1.0/test-keys
+        run: |
+          set -e
+          for suite in smoke m3 m4 m5 m6 m7 m8 m9 m10; do
+            echo "== $suite"
+            ./tests/$suite.sh
+          done
+      - name: server log on failure
+        if: failure()
+        run: tail -50 serve.log
