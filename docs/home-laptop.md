@@ -272,6 +272,31 @@ keys, issues, PRs, releases, LFS objects and webhooks all live in `data/`.
 If you prefer, stop the service on A and copy `~/.local/share/loom`
 directly — same result, minus the consistency guarantees.
 
+### Coming from Forgejo or Gitea
+
+`scripts/import-forgejo.sh` imports every repository of a user or org, with all
+branches and tags. Run it on the loom machine, because repositories are
+registered with the CLI:
+
+```sh
+# public repositories
+./scripts/import-forgejo.sh --from http://localhost:3030 --owner Fel-2 \
+    --loom-owner fel --loom-data ~/.local/share/loom \
+    --push-base ssh://git@localhost:2223
+
+# private ones too: Forgejo → Settings → Applications → Generate token
+./scripts/import-forgejo.sh --from https://git.example.com --owner me \
+    --token <forgejo-token> --loom-owner fel
+```
+
+`--dry-run` lists what it would do. Existing repositories are skipped, so it is
+safe to re-run; `--force` re-pushes into them. Descriptions, privacy and the
+default branch are carried over.
+
+What does not come across: issues, pull requests, releases, stars, topics and
+wikis. loom has no API for them, so releases have to be recreated per tag in the
+web UI — a git tag alone is not a release page.
+
 ## 9. Upgrading
 
 Replace the binary and restart:
