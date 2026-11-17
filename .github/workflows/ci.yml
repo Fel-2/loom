@@ -75,15 +75,15 @@ jobs:
         run: ./bench/guard.sh target/release/loom
 
   dist-aarch64:
-    runs-on: ubuntu-latest
+    # Native arm64 runner (free for public repos). Compiling there takes about
+    # as long as x86_64; under QEMU emulation it was an hour.
+    runs-on: ubuntu-24.04-arm
     needs: build
-    # Cross-compiling 340 crates under QEMU takes 30-60 minutes, so it only runs
-    # for a release tag or a manual dispatch, never on every push.
+    # Only for a release tag or a manual dispatch, never on every push.
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    timeout-minutes: 120
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - name: aarch64 static tarball
         run: |
           PODMAN=docker ARCH=aarch64 ./scripts/dist.sh
