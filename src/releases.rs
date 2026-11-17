@@ -318,7 +318,7 @@ struct NewF {
     prerelease: Option<String>,
 }
 
-fn valid_tag(t: &str) -> bool {
+pub(crate) fn valid_tag(t: &str) -> bool {
     !t.is_empty() && t.len() <= 200 && !t.starts_with('-') && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/+~-".contains(&b))
 }
 

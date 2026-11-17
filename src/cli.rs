@@ -13,6 +13,7 @@ usage: loom [serve]
        loom user list
        loom user 2fa-off <name>   (recover an account that lost its authenticator)
        loom key add <user> <pubkey-file|-> [title]
+       loom token add <user> [--title <text>]   (prints a one-time API token)
        loom repo create <owner>/<name> [--private] [--desc <text>]
        loom repo adopt        register bare repos already on disk (public)
        loom repo list
@@ -102,6 +103,7 @@ pub fn run(args: &[String]) -> Option<Result<(), String>> {
         ("user", Some("list")) => user_list(&app),
         ("user", Some("2fa-off")) => user_2fa_off(&app, rest),
         ("key", Some("add")) => key_add(&app, rest),
+        ("token", Some("add")) => token_add(&app, rest),
         ("repo", Some("create")) => repo_create(&app, rest),
         ("repo", Some("adopt")) => repo_adopt(&app),
         ("repo", Some("list")) => repo_list(&app),
@@ -235,6 +237,18 @@ fn user_list(app: &App) -> Result<(), String> {
     for u in app.db.users().map_err(|e| e.to_string())? {
         println!("{}{}{}", u.name, if u.is_admin { "  admin" } else { "" }, if u.email.is_empty() { String::new() } else { format!("  <{}>", u.email) });
     }
+    Ok(())
+}
+
+fn token_add(app: &App, args: &[String]) -> Result<(), String> {
+    let name = args.first().ok_or(USAGE)?;
+    let u = app.db.user_by_name(name).map_err(|e| e.to_string())?.ok_or_else(|| format!("no user named '{name}'"))?;
+    let title = opt(args, "--title").unwrap_or("cli");
+    if title.len() > 100 {
+        return Err("title at most 100 characters".into());
+    }
+    let raw = app.db.create_token(u.id, title).map_err(|e| e.to_string())?;
+    println!("{raw}");
     Ok(())
 }
 

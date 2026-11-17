@@ -115,11 +115,11 @@ impl Db {
             .optional()
     }
 
-    pub fn create_webhook(&self, repo_id: i64, url: &str, secret: &str, events: &str) -> Result<i64> {
+    pub fn create_webhook(&self, repo_id: i64, url: &str, secret: &str, events: &str, active: bool) -> Result<i64> {
         let c = self.c();
         c.execute(
-            "INSERT INTO webhooks (repo_id, url, secret, events, created) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![repo_id, url, secret, events, now()],
+            "INSERT INTO webhooks (repo_id, url, secret, events, active, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![repo_id, url, secret, events, active, now()],
         )?;
         Ok(c.last_insert_rowid())
     }

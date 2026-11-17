@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Milestone 6: webhooks (signed, retried, logged), commit statuses + required
-# checks, REST API with tokens, notifications/watching, activity, search.
+# checks, REST API with tokens, notifications/watching, activity, search —
+# plus the grown API (issue editing, labels, milestones, releases, hooks, PRs),
+# the CSP header, Atom feeds and reactions.
 # Fresh repo per run; a local receiver (127.0.0.1:3999) records deliveries.
 # Git runs with an empty config: no credential helpers, never any prompt/GUI.
 set -u
@@ -128,6 +130,88 @@ check "  pending still blocks"                   has "$(page alice /$R/pulls/$P)
 api $MT POST /repos/$R/statuses/$HS -d '{"state":"success","context":"ci/jenkins","target_url":"http://jenkins/42"}' >/dev/null
 check "  success unblocks; merge works"          is "$(post alice /$R/pulls/$P/merge -d strategy=merge -d expected_head=$(head_of $P))" 303
 check "  merged webhook: closed + merged:true"   wait_hook pull_request '"merged":true'
+
+echo "== API: editing, labels, milestones, releases, hooks, PRs"
+check "PATCH issue: edit + close -> 200"         is "$(api $BT PATCH /repos/$R/issues/$AI -d "{\"title\":\"api issue edited $RUN\",\"state\":\"closed\"}")" 200
+check "  title and state applied"                bash -c "[ \"\$(curl -s $B/api/v1/repos/$R/issues/$AI | python3 -I -c 'import json,sys; i=json.load(sys.stdin); print(i[\"state\"], i[\"title\"])')\" = 'closed api issue edited $RUN' ]"
+check "  timeline shows the close"               has "$(page anon /$R/issues/$AI)" "closed this"
+check "reopen via PATCH"                        is "$(api $BT PATCH /repos/$R/issues/$AI -d '{"state":"open"}')" 200
+check "PATCH by anon -> 401"                    is "$(api '' PATCH /repos/$R/issues/$AI -d '{}')" 401
+check "create label via API -> 201"             is "$(api $MT POST /repos/$R/labels -d '{"name":"api-need","color":"#0e8a16","description":"from api"}')" 201
+LID=$(python3 -I -c 'import json; print(json.load(open("'$W'/api.json"))["id"])' 2>/dev/null)
+check "list labels includes it"                  bash -c "curl -s $B/api/v1/repos/$R/labels | grep -q 'api-need'"
+check "duplicate label -> 409"                  is "$(api $MT POST /repos/$R/labels -d '{"name":"api-need","color":"#0e8a16"}')" 409
+check "bad color -> 422"                        is "$(api $MT POST /repos/$R/labels -d '{"name":"x2","color":"red"}')" 422
+check "set issue labels via PATCH"              is "$(api $MT PATCH /repos/$R/issues/$AI -d '{"labels":["api-need"]}')" 200
+check "  label landed on the web page"          has "$(page anon /$R/issues/$AI)" "api-need"
+check "unknown label -> 422"                    is "$(api $MT PATCH /repos/$R/issues/$AI -d '{"labels":["nope"]}')" 422
+check "edit label via PATCH"                    is "$(api $MT PATCH /repos/$R/labels/$LID -d '{"name":"api-need","color":"#5319e7"}')" 200
+check "delete label via DELETE -> 204"          is "$(api $MT DELETE /repos/$R/labels/$LID)" 204
+check "milestone via API -> 201"                is "$(api $MT POST /repos/$R/milestones -d '{"title":"v2.0","description":"next"}')" 201
+check "assign milestone by title"               is "$(api $MT PATCH /repos/$R/issues/$AI -d '{"milestone":"v2.0"}')" 200
+check "  milestone shown on the page"          has "$(page anon /$R/issues/$AI)" "v2.0"
+check "unknown milestone -> 422"               is "$(api $MT PATCH /repos/$R/issues/$AI -d '{"milestone":"nope"}')" 422
+check "bob (read) can't write labels -> 403"    is "$(api $BT POST /repos/$R/labels -d '{"name":"boblab","color":"#000000"}')" 403
+check "list comments via API"                   bash -c "curl -s $B/api/v1/repos/$R/issues/$AI/comments | grep -q 'api comment'"
+cd w; as alice git tag v9.9.9; as alice git push -q $S/$R.git v9.9.9; cd ..
+check "release via API -> 201"                  is "$(api $MT POST /repos/$R/releases -d '{"tag_name":"v9.9.9","name":"Nine","body":"api notes"}')" 201
+RLID=$(python3 -I -c 'import json; print(json.load(open("'$W'/api.json"))["id"])' 2>/dev/null)
+check "list releases includes it"               bash -c "curl -s $B/api/v1/repos/$R/releases | grep -q '\"tag_name\":\"v9.9.9\"'"
+check "unknown tag -> 422"                      is "$(api $MT POST /repos/$R/releases -d '{"tag_name":"v0.0.0","name":"x"}')" 422
+check "edit release via PATCH"                  is "$(api $MT PATCH /repos/$R/releases/$RLID -d '{"tag_name":"v9.9.9","name":"Nine!","body":"edited","prerelease":true}')" 200
+check "bob can't delete it -> 403"              is "$(api $BT DELETE /repos/$R/releases/$RLID)" 403
+check "create hook via API -> 201"              is "$(api $MT POST /repos/$R/hooks -d '{"url":"http://127.0.0.1:3999/api","events":["push"]}')" 201
+HID=$(python3 -I -c 'import json; print(json.load(open("'$W'/api.json"))["id"])' 2>/dev/null)
+check "list hooks shows it"                     bash -c "curl -s -H 'Authorization: Bearer $MT' $B/api/v1/repos/$R/hooks | grep -q 3999/api"
+check "unknown event -> 422"                    is "$(api $MT POST /repos/$R/hooks -d '{"url":"http://x/","events":["nope"]}')" 422
+check "delete hook via DELETE -> 204"           is "$(api $MT DELETE /repos/$R/hooks/$HID)" 204
+cd w; git checkout -q main; git checkout -qb apifeat; echo api > api.txt; git add api.txt; as alice git commit -qm "api feat"; as alice git push -q $S/$R.git apifeat; cd ..
+check "API PR from a branch -> 201"             is "$(api $BT POST /repos/$R/pulls -d '{"base":"main","head":"apifeat","title":"feat via api","draft":true}')" 201
+AP=$(python3 -I -c 'import json; print(json.load(open("'$W'/api.json"))["number"])' 2>/dev/null)
+check "  it is a draft"                         bash -c "curl -s $B/api/v1/repos/$R/pulls/$AP | grep -q '\"draft\":true'"
+check "  API merge of a draft -> 422"           is "$(api $MT POST /repos/$R/pulls/$AP/merge -d '{}')" 422
+check "  bob (read) can't API-merge -> 403"     is "$(api $BT POST /repos/$R/pulls/$AP/merge -d '{}')" 403
+check "  mark ready via the web"                is "$(post alice /$R/pulls/$AP/ready)" 303
+check "  required check blocks the API merge"   is "$(api $MT POST /repos/$R/pulls/$AP/merge -d '{"strategy":"squash"}')" 422
+AS=$(git -C w rev-parse apifeat)
+api $MT POST /repos/$R/statuses/$AS -d '{"state":"success","context":"ci/jenkins"}' >/dev/null
+check "  green check, API merge -> 200"         is "$(api $MT POST /repos/$R/pulls/$AP/merge -d '{"strategy":"squash"}')" 200
+check "  PR shows merged:true"                  bash -c "curl -s $B/api/v1/repos/$R/pulls/$AP | grep -q '\"merged\":true'"
+cd w; git checkout -q main; git checkout -qb dup; echo dup > dup.txt; git add dup.txt; as alice git commit -qm dup; as alice git push -q $S/$R.git dup; cd ..
+api $BT POST /repos/$R/pulls -d '{"base":"main","head":"dup","title":"first"}' >/dev/null
+check "second PR for the same head -> 409"      is "$(api $BT POST /repos/$R/pulls -d '{"base":"main","head":"dup","title":"second"}')" 409
+
+echo "== security headers & feeds"
+check "CSP on HTML pages"                       bash -c "curl -sI $B/$R | grep -qi \"content-security-policy: default-src 'none'\""
+check "CSP on API responses too"                bash -c "curl -sI $B/api/v1/repos/$R | grep -qi content-security-policy"
+check "commits feed is Atom"                    bash -c "curl -s $B/$R/atom.xml | grep -q '<?xml version=\"1.0\" encoding=\"utf-8\"?>' && curl -s $B/$R/atom.xml | grep -q '<feed xmlns=\"http://www.w3.org/2005/Atom\">'"
+check "  feed lists commits"                    has "$(curl -s $B/$R/atom.xml)" "initial"
+check "  feed validates as XML"                 python3 -I -c "import xml.dom.minidom,urllib.request; xml.dom.minidom.parseString(urllib.request.urlopen('$B/$R/atom.xml').read())"
+check "  ETag -> 304"                           bash -c "t=\$(curl -sI $B/$R/atom.xml | grep -i '^etag' | tr -d '\r' | cut -d' ' -f2); [ -n \"\$t\" ] && [ \"\$(curl -s -o /dev/null -w '%{http_code}' -H \"If-None-Match: \$t\" $B/$R/atom.xml)\" = 304 ]"
+check "issues feed has entries"                 bash -c "curl -s $B/$R/issues.atom.xml | grep -q '<entry>'"
+check "releases feed lists the release"         has "$(curl -s $B/$R/releases.atom.xml)" "Nine!"
+cd w; as alice git tag v8.8.8; as alice git push -q $S/$R.git v8.8.8; cd ..
+api $MT POST /repos/$R/releases -d '{"tag_name":"v8.8.8","name":"SecretDraft","draft":true}' >/dev/null
+check "draft release hidden from anon feed"     lacks "$(curl -s $B/$R/releases.atom.xml)" "SecretDraft"
+check "  ...visible with write access"          has "$(curl -s -b $W/alice.jar $B/$R/releases.atom.xml)" "SecretDraft"
+check "private repo feed anon -> 404"           is "$(curl -s -o /dev/null -w '%{http_code}' $B/alice/secret/atom.xml)" 404
+check "private feed with a token -> 200"        bash -c "curl -s -H 'Authorization: Bearer $MT' $B/alice/secret/atom.xml | grep -q '<feed xmlns'"
+check "bad token on a feed -> 401"              is "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer loom_wrong' $B/$R/atom.xml)" 401
+check "feed discovery links in the head"       bash -c "curl -s $B/$R | grep -q 'rel=\"alternate\" type=\"application/atom+xml\"'"
+check "og:title meta tag"                      bash -c "curl -s $B/$R | grep -q 'property=\"og:title\"'"
+
+echo "== reactions"
+RI=$(new_issue alice $R "react to me $RUN" "")
+check "react via the form"                      is "$(post bob /$R/issues/$RI/react --data-urlencode name=+1)" 303
+check "  reaction renders with a count"         has "$(page anon /$R/issues/$RI)" "👍 1"
+check "  same user toggles it off"              is "$(post bob /$R/issues/$RI/react --data-urlencode name=+1)" 303
+check "  gone"                                  lacks "$(page anon /$R/issues/$RI)" "👍 1"
+check "bob reacts again"                        is "$(post bob /$R/issues/$RI/react --data-urlencode name=+1)" 303
+check "alice reacts too"                        is "$(post alice /$R/issues/$RI/react --data-urlencode name=+1)" 303
+check "  count is two"                          has "$(page anon /$R/issues/$RI)" "👍 2"
+check "unknown reaction -> 400"                 is "$(post bob /$R/issues/$RI/react --data-urlencode name=party)" 400
+check "react on a PR"                           is "$(post bob /$R/pulls/$P/react --data-urlencode name=heart)" 303
+check "  rendered with the emoji"              has "$(page anon /$R/pulls/$P)" "❤️ 1"
 
 echo "== notifications & watching"
 BI=$(new_issue bob $R "bob reports $RUN" "")

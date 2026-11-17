@@ -123,7 +123,7 @@ async fn hook_create(State(app): St, Authed(u): Authed, Path((owner, name)): Pat
         return crate::web::settings_page(&app, &ctx, None, Some("Pick at least one event."));
     }
     let ev = if events.len() == crate::social_db::HOOK_EVENTS.len() { "*".to_owned() } else { events.join(",") };
-    let id = app.db.create_webhook(ctx.repo.id, &url, &secret, &ev)?;
+    let id = app.db.create_webhook(ctx.repo.id, &url, &secret, &ev, true)?;
     crate::events::queue_ping(&app.db, &app.url, &ctx.repo, id);
     crate::web::settings_page(&app, &ctx, Some("Webhook added; a ping is on its way."), None)
 }

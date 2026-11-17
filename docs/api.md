@@ -40,9 +40,28 @@ Base: `http://your-host:3000/api/v1`
 | GET | `/repos/{owner}/{name}/issues` | `?state=open\|closed&label=&page=` |
 | POST | `/repos/{owner}/{name}/issues` | `{"title","body"}`, 201 |
 | GET | `/repos/{owner}/{name}/issues/{number}` | |
+| PATCH | `/repos/{owner}/{name}/issues/{number}` | any of `title`, `body`, `state` (`open`/`closed`), `labels` (array of names), `milestone` (title, `""` clears); author or write access |
+| GET | `/repos/{owner}/{name}/issues/{number}/comments` | |
 | POST | `/repos/{owner}/{name}/issues/{number}/comments` | `{"body"}`, 201 |
 | GET | `/repos/{owner}/{name}/pulls` | same filters as issues |
-| GET | `/repos/{owner}/{name}/pulls/{number}` | includes `head`, `base`, `merge_commit_sha` |
+| POST | `/repos/{owner}/{name}/pulls` | `{"base","head","title","body","draft"}`, 201; `409` if an open PR already proposes those changes |
+| GET | `/repos/{owner}/{name}/pulls/{number}` | includes `head`, `base`, `merge_commit_sha`, `draft` |
+| POST | `/repos/{owner}/{name}/pulls/{number}/merge` | `{"strategy":"merge"\|"squash"\|"rebase","expected_head"}`, both optional; required checks and drafts still block |
+| GET | `/repos/{owner}/{name}/labels` | |
+| POST | `/repos/{owner}/{name}/labels` | `{"name","color":"#rrggbb","description"}`, 201; `409` on a duplicate name |
+| PATCH | `/repos/{owner}/{name}/labels/{id}` | same body as create |
+| DELETE | `/repos/{owner}/{name}/labels/{id}` | 204 |
+| GET | `/repos/{owner}/{name}/milestones` | |
+| POST | `/repos/{owner}/{name}/milestones` | `{"title","description","due"}`, 201 |
+| PATCH | `/repos/{owner}/{name}/milestones/{id}` | same body, plus `closed` |
+| DELETE | `/repos/{owner}/{name}/milestones/{id}` | 204 |
+| GET | `/repos/{owner}/{name}/releases` | drafts only with write access |
+| POST | `/repos/{owner}/{name}/releases` | `{"tag_name","name","body","draft","prerelease"}`, 201; the tag must exist |
+| PATCH | `/repos/{owner}/{name}/releases/{id}` | same body; the tag must not change |
+| DELETE | `/repos/{owner}/{name}/releases/{id}` | 204 |
+| GET | `/repos/{owner}/{name}/hooks` | write access |
+| POST | `/repos/{owner}/{name}/hooks` | `{"url","secret","events":["push",…],"active"}`, 201; a ping is queued unless `active:false` |
+| DELETE | `/repos/{owner}/{name}/hooks/{id}` | 204 |
 | GET | `/repos/{owner}/{name}/statuses/{sha}` | all statuses for a commit |
 | POST | `/repos/{owner}/{name}/statuses/{sha}` | report a status (write access) |
 | GET | `/repos/{owner}/{name}/commits/{rev}/status` | combined state |
