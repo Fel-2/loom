@@ -22,8 +22,9 @@ migrates in place on first start (v8).
   an API token (bad token = 401, never a silent downgrade).
 - **Reactions**: 👍 👎 😄 😕 ❤️ 🎉 🚀 👀 on issues and PRs, no-JS toggles.
 - **Security**: `Content-Security-Policy` on every response — the UI ships no
-  scripts, so everything is denied except the stylesheet, same-origin
-  images and forms (`SECURITY.md` gap closed).
+  scripts, so everything is denied except the stylesheet, forms and images
+  (README badges and screenshots may live on other hosts; `<img>` cannot run
+  script). `SECURITY.md` gap closed.
 - **Portability**: `scripts/dist.sh` builds an aarch64 static tarball
   (`ARCH=aarch64`), and CI builds both tarballs; the runtime container
   image was already multi-arch.

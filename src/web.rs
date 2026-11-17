@@ -127,14 +127,16 @@ async fn same_origin(req: Request, next: Next) -> Response {
 }
 
 /// Every page ships no scripts, so deny everything and allow only what the
-/// UI actually uses: the stylesheet, same-origin images (avatars), forms —
-/// and inline `style` attributes, which carry label colors and bar widths.
+/// UI uses: the stylesheet, forms, inline `style` attributes (label colours,
+/// bar widths) — and images from anywhere, because READMEs and issues embed
+/// badges and screenshots hosted elsewhere. Images cannot execute script, so
+/// the cost is third-party requests, not XSS.
 async fn security_headers(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     res.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'none'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+            "default-src 'none'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' http: https: data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
         ),
     );
     res
