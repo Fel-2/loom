@@ -3,6 +3,7 @@ mod app;
 mod cli;
 mod db;
 mod events;
+mod feeds;
 mod git;
 mod githttp;
 mod gitops;

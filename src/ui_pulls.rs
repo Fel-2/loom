@@ -36,6 +36,7 @@ pub fn head(h: &HeadInfo<'_>, tab: PrTab) -> Markup {
             h2 { (i.title) " " span.muted { "#" (i.number) } }
             div.meta {
                 (pr_state_pill(i.closed, i.merged))
+                @if i.draft { " " span.badge.warn { "draft" } }
                 span.muted {
                     @match &i.author { Some(a) => a.who href={ "/" (a) } { (a) }, None => "ghost" }
                     @if i.merged { " merged " } @else { " wants to merge " }
@@ -72,6 +73,8 @@ pub struct MergeBox<'a> {
     pub head_exists: bool,
     pub approvals: usize,
     pub changes_requested: usize,
+    /// The author (or write access) may flip draft <-> ready.
+    pub can_toggle_draft: bool,
     /// Rendered commit statuses for the head.
     pub checks: Markup,
 }
@@ -99,6 +102,19 @@ pub fn merge_box(m: &MergeBox<'_>) -> Markup {
             } @else if p.closed {
                 div.mb-row { span.big.muted { "✕" } div { strong { "Closed without merging" } } }
             } @else {
+                @if p.draft {
+                    div.mb-row {
+                        span.big.muted { "✎" }
+                        div {
+                            strong { "Draft" }
+                            div.muted.small { "Merging is disabled until it is marked ready." }
+                        }
+                        @if m.can_toggle_draft {
+                            span.grow {}
+                            form.inline method="post" action={ (m.pbase) "/ready" } { button.btn { "mark ready for review" } }
+                        }
+                    }
+                }
                 (m.checks)
                 @if m.approvals > 0 || m.changes_requested > 0 {
                     div.mb-row.small {
@@ -238,6 +254,9 @@ pub fn compare_result(r: &CompareResult<'_>) -> Markup {
                     input type="hidden" name="head" value=(r.sel_head);
                     label { "title" input name="title" value=(r.title) required maxlength="256"; }
                     label { "description" textarea.body name="body" rows="6" placeholder="What does this change? 'Fixes #12' closes the issue on merge." { (r.body) } }
+                    @if r.existing.is_none() {
+                        label.check { input type="checkbox" name="draft" value="1"; "draft (work in progress; merging disabled until marked ready)" }
+                    }
                     button.btn.primary { "create pull request" }
                 }
             }

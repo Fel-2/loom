@@ -19,6 +19,7 @@ pub struct Pull {
     pub merged_by: Option<String>,
     pub merge_sha: Option<String>,
     pub closed: bool,
+    pub draft: bool,
 }
 
 pub struct Revision {
@@ -50,7 +51,7 @@ pub struct ReviewComment {
 }
 
 const PULL_COLS: &str = "p.issue_id, i.repo_id, i.number, p.head_repo_id, p.head_branch, p.base_branch, p.head_sha,
-     p.merged, p.merged_at, u.name, p.merge_sha, i.closed";
+     p.merged, p.merged_at, u.name, p.merge_sha, i.closed, p.draft";
 const PULL_FROM: &str = "pulls p JOIN issues i ON i.id = p.issue_id LEFT JOIN users u ON u.id = p.merged_by";
 
 fn pull_row(r: &rusqlite::Row<'_>) -> Result<Pull> {
@@ -67,6 +68,7 @@ fn pull_row(r: &rusqlite::Row<'_>) -> Result<Pull> {
         merged_by: r.get(9)?,
         merge_sha: r.get(10)?,
         closed: r.get(11)?,
+        draft: r.get(12)?,
     })
 }
 
@@ -83,18 +85,25 @@ impl Db {
         base_branch: &str,
         head_sha: &str,
         base_sha: &str,
+        draft: bool,
     ) -> Result<(i64, i64)> {
         let (issue_id, number) = self.create_issue(repo_id, author_id, title, body, true)?;
         let c = self.c();
         c.execute(
-            "INSERT INTO pulls (issue_id, head_repo_id, head_branch, base_branch, head_sha) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![issue_id, head_repo_id, head_branch, base_branch, head_sha],
+            "INSERT INTO pulls (issue_id, head_repo_id, head_branch, base_branch, head_sha, draft) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![issue_id, head_repo_id, head_branch, base_branch, head_sha, draft],
         )?;
         c.execute(
             "INSERT INTO pull_revisions (issue_id, n, head_sha, base_sha, pusher_id, created) VALUES (?1, 1, ?2, ?3, ?4, ?5)",
             params![issue_id, head_sha, base_sha, author_id, now()],
         )?;
         Ok((issue_id, number))
+    }
+
+    /// Draft -> ready (or back again, for the author).
+    pub fn set_pull_draft(&self, issue_id: i64, draft: bool) -> Result<()> {
+        self.c().execute("UPDATE pulls SET draft = ?1 WHERE issue_id = ?2 AND merged = 0", params![draft, issue_id])?;
+        Ok(())
     }
 
     pub fn pull(&self, repo_id: i64, number: i64) -> Result<Option<Pull>> {

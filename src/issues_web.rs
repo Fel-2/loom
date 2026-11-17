@@ -355,6 +355,7 @@ pub struct Parts {
     pub assignees: Vec<String>,
     pub labels: Vec<issues_db::Label>,
     pub milestones: Vec<issues_db::Milestone>,
+    pub reactions: Vec<(String, i64, bool)>,
 }
 
 pub fn issue_parts(app: &Arc<App>, ctx: &Ctx, issue: &Issue) -> Result<Parts, Err> {
@@ -378,6 +379,7 @@ pub fn issue_parts(app: &Arc<App>, ctx: &Ctx, issue: &Issue) -> Result<Parts, Er
         assignees: app.db.assignees(issue.id)?,
         labels: app.db.labels(ctx.repo.id)?,
         milestones: app.db.milestones(ctx.repo.id)?,
+        reactions: app.db.reactions(issue.id, viewer.map(|u| u.id))?,
     })
 }
 
@@ -403,6 +405,7 @@ pub fn show_data<'a>(ctx: &Ctx, base: &'a str, issue: &'a Issue, mut parts: Part
         can_triage: triage && !ctx.repo.archived,
         can_close: (is_author || triage) && !locked,
         archived: ctx.repo.archived,
+        reactions: parts.reactions,
         msg,
         err,
         head: None,
@@ -537,6 +540,24 @@ async fn set_milestone(State(app): St, Authed(u): Authed, Path((owner, name, num
     if app.db.set_issue_milestone(ctx.repo.id, &issue, m, u.id).is_err() {
         return render_issue(&app, &ctx, number, None, Some("No such milestone."));
     }
+    Ok(back(&ctx, &issue))
+}
+
+#[derive(Deserialize)]
+struct ReactF {
+    name: String,
+}
+
+async fn react(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>, Form(f): Form<ReactF>) -> Res {
+    let ctx = Ctx::load(&app, Some(u.clone()), &owner, &name)?;
+    if ctx.repo.archived {
+        return Err(Err::NotFound);
+    }
+    let issue = load_issue(&app, &ctx, number)?;
+    if !issues_db::REACTIONS.contains(&f.name.as_str()) {
+        return render_issue(&app, &ctx, number, None, Some("Unknown reaction."));
+    }
+    app.db.toggle_reaction(issue.id, u.id, &f.name)?;
     Ok(back(&ctx, &issue))
 }
 
@@ -745,12 +766,14 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/issues/{number}/labels", post(set_labels))
         .route("/{owner}/{name}/issues/{number}/assignees", post(assign))
         .route("/{owner}/{name}/issues/{number}/milestone", post(set_milestone))
+        .route("/{owner}/{name}/issues/{number}/react", post(react))
         .route("/{owner}/{name}/pulls", get(list_pulls))
         .route("/{owner}/{name}/pulls/{number}/comments", post(comment))
         .route("/{owner}/{name}/pulls/{number}/edit", post(edit))
         .route("/{owner}/{name}/pulls/{number}/labels", post(set_labels))
         .route("/{owner}/{name}/pulls/{number}/assignees", post(assign))
         .route("/{owner}/{name}/pulls/{number}/milestone", post(set_milestone))
+        .route("/{owner}/{name}/pulls/{number}/react", post(react))
         .route("/{owner}/{name}/comments/{id}/edit", post(comment_edit))
         .route("/{owner}/{name}/comments/{id}/delete", post(comment_delete))
         .route("/{owner}/{name}/labels", get(labels).post(label_create))

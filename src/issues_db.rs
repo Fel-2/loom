@@ -41,6 +41,8 @@ pub struct Issue {
     pub labels: Vec<Label>,
     /// PRs only.
     pub merged: bool,
+    /// PRs only.
+    pub draft: bool,
 }
 
 pub struct Comment {
@@ -52,6 +54,9 @@ pub struct Comment {
     pub created: i64,
     pub updated: i64,
 }
+
+/// Emoji tokens an issue or PR accepts, mapped where they render.
+pub const REACTIONS: &[&str] = &["+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"];
 
 pub struct Event {
     pub actor: Option<String>,
@@ -75,7 +80,7 @@ pub fn valid_color(c: &str) -> bool {
 }
 
 const ISSUE_COLS: &str = "i.id, i.number, i.is_pr, i.title, i.body, u.name, i.author_id, i.closed, i.milestone_id,
-     m.title, i.comments, i.created, i.updated, i.closed_at, COALESCE(p.merged, 0)";
+     m.title, i.comments, i.created, i.updated, i.closed_at, COALESCE(p.merged, 0), COALESCE(p.draft, 0)";
 const ISSUE_FROM: &str = "issues i LEFT JOIN users u ON u.id = i.author_id LEFT JOIN milestones m ON m.id = i.milestone_id
      LEFT JOIN pulls p ON p.issue_id = i.id";
 
@@ -97,6 +102,7 @@ fn issue_row(r: &Row<'_>) -> Result<Issue> {
         closed_at: r.get(13)?,
         labels: Vec::new(),
         merged: r.get(14)?,
+        draft: r.get(15)?,
     })
 }
 
@@ -229,6 +235,20 @@ impl Db {
             let mut p: Vec<&dyn rusqlite::ToSql> = vec![&repo_id, &is_pr];
             p.extend(args.iter().map(|a| a as &dyn rusqlite::ToSql));
             st.query_map(p.as_slice(), issue_row)?.collect::<Result<Vec<_>>>()?
+        };
+        self.attach_labels(&mut issues)?;
+        Ok(issues)
+    }
+
+    /// Most recently updated issues and PRs, for the Atom feed.
+    pub fn recent_issues(&self, repo_id: i64, limit: usize) -> Result<Vec<Issue>> {
+        let mut issues = {
+            let c = self.c();
+            let mut st = c.prepare(&format!(
+                "SELECT {ISSUE_COLS} FROM {ISSUE_FROM} WHERE i.repo_id = ?1
+                 ORDER BY i.updated DESC, i.number DESC LIMIT {limit}"
+            ))?;
+            st.query_map([repo_id], issue_row)?.collect::<Result<Vec<_>>>()?
         };
         self.attach_labels(&mut issues)?;
         Ok(issues)
@@ -528,5 +548,34 @@ impl Db {
             self.add_event(issue_id, Some(actor), "unassigned", name, None)?;
         }
         Ok(())
+    }
+
+    // ---- reactions ----
+
+    /// Toggle the viewer's reaction; returns the new state.
+    pub fn toggle_reaction(&self, issue_id: i64, user_id: i64, name: &str) -> Result<bool> {
+        let c = self.c();
+        if c.execute(
+            "DELETE FROM reactions WHERE issue_id = ?1 AND user_id = ?2 AND name = ?3",
+            params![issue_id, user_id, name],
+        )? > 0
+        {
+            return Ok(false);
+        }
+        c.execute(
+            "INSERT INTO reactions (issue_id, user_id, name, created) VALUES (?1, ?2, ?3, ?4)",
+            params![issue_id, user_id, name, now()],
+        )?;
+        Ok(true)
+    }
+
+    /// (name, count, mine) per reaction, ordered by count.
+    pub fn reactions(&self, issue_id: i64, viewer: Option<i64>) -> Result<Vec<(String, i64, bool)>> {
+        let c = self.c();
+        let mut st = c.prepare(
+            "SELECT name, COUNT(*), EXISTS (SELECT 1 FROM reactions r2 WHERE r2.issue_id = reactions.issue_id
+             AND r2.user_id = ?2 AND r2.name = reactions.name) FROM reactions WHERE issue_id = ?1 GROUP BY name ORDER BY COUNT(*) DESC, name",
+        )?;
+        st.query_map(params![issue_id, viewer.unwrap_or(-1)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
     }
 }

@@ -31,6 +31,10 @@ That assumption is load-bearing:
 
 ## What is in place
 
+- A `Content-Security-Policy` on every response: `default-src 'none'`, with
+  only the stylesheet, same-origin images and forms allowed (the UI ships no
+  JavaScript at all; inline `style` attributes carry label colors and bar
+  widths)
 - argon2id password hashing, SHA-256-hashed session tokens, HttpOnly +
   SameSite=Lax cookies
 - Cross-origin form posts rejected (`Origin` must match `Host`); every
@@ -48,7 +52,6 @@ That assumption is load-bearing:
 ## Known gaps
 
 - Not audited by anyone but the author, and not fuzzed.
-- The web UI has no CSP header.
 - `loom user 2fa-off` is an unauthenticated-at-the-DB-level recovery path: it
   needs filesystem access to the data directory, so it protects against a lost
   authenticator, not against a compromised host.

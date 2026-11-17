@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Milestone 5: pull requests — same-repo and fork PRs, revisions, reviews,
 # inline comments, merge/squash/rebase, conflicts, merged-by-push,
-# require-PR protection, branch deletion. Uses a fresh repo per run.
+# require-PR protection, branch deletion, draft PRs. Uses a fresh repo per run.
 # Git runs with an empty config: no credential helpers, never any prompt/GUI.
 set -u
 B=${LOOM_TEST_URL:-http://127.0.0.1:3917}
@@ -160,6 +160,20 @@ check "  'closed without merging'"              has "$(page anon /$R/pulls/$PX)"
 check "  closed list shows merged + closed"     bash -c "p=\$(curl -s '$B/$R/pulls?state=closed'); grep -q 'title=\"merged\"' <<<\"\$p\" && grep -q 'to close' <<<\"\$p\""
 check "bob reopens it"                          is "$(post bob /$R/pulls/$PX/comments -d body= -d action=reopen)" 303
 check "duplicate PR for same head -> existing"  bash -c "[ \"\$(curl -s -o /dev/null -w '%{redirect_url}' -b $W/bob.jar -H 'Origin: $B' -d base=main -d head=$F:another -d title=dup -d body= $B/$R/pulls/new | grep -oE '[0-9]+\$')\" = $PX ]"
+
+echo "== draft PRs"
+cd w; git checkout -q main; git checkout -qb d1; echo d > d.txt; git add d.txt; as alice git commit -qm "draft work"; as alice git push -q $S/$R.git d1; cd ..
+PD=$(curl -s -o /dev/null -w '%{redirect_url}' -b "$W/alice.jar" -H "Origin: $B" --data-urlencode base=main --data-urlencode head=d1 --data-urlencode "title=work in progress" --data-urlencode body= --data-urlencode draft=1 "$B/$R/pulls/new" | grep -oE '[0-9]+$')
+check "create draft PR"                         bash -c "[ -n '$PD' ]"
+check "  list shows the draft badge"            has "$(page anon "/$R/pulls?state=open")" 'badge warn'
+check "  merge box says draft, no merge form"   bash -c "p=\$(curl -s $B/$R/pulls/$PD); grep -q 'Draft' <<<\"\$p\" && ! grep -q 'merge pull request' <<<\"\$p\""
+check "  merging a draft -> 400"                 is "$(merge $PD merge)" 400
+check "bob (read) can't mark ready"             is "$(post bob /$R/pulls/$PD/ready)" 400
+check "author marks it ready"                   is "$(post alice /$R/pulls/$PD/ready)" 303
+check "  merge form is back"                    has "$(page alice /$R/pulls/$PD)" "merge pull request"
+check "  author can return it to draft"         is "$(post alice /$R/pulls/$PD/draft)" 303
+check "  ready again"                           is "$(post alice /$R/pulls/$PD/ready)" 303
+check "  now it merges"                         is "$(merge $PD merge)" 303
 
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

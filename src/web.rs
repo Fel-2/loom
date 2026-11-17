@@ -126,6 +126,20 @@ async fn same_origin(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// Every page ships no scripts, so deny everything and allow only what the
+/// UI actually uses: the stylesheet, same-origin images (avatars), forms —
+/// and inline `style` attributes, which carry label colors and bar widths.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+        ),
+    );
+    res
+}
+
 // ---------- caching ----------
 
 /// Conditional response. The tag = git ids + viewer + repo header state, so a
@@ -225,7 +239,16 @@ impl Ctx {
     }
     pub fn page(&self, title: &str, body: Markup) -> Response {
         let t = format!("{title}{}{}/{}", if title.is_empty() { "" } else { " · " }, self.repo.owner, self.repo.name);
-        ui::page(&t, self.viewer.as_ref(), body).into_response()
+        let base = self.base();
+        let desc: String = if self.repo.description.is_empty() { format!("{}/{} on loom", self.repo.owner, self.repo.name) } else { self.repo.description.clone() };
+        let head = html! {
+            link rel="alternate" type="application/atom+xml" title="commits" href={ (base) "/atom.xml" };
+            link rel="alternate" type="application/atom+xml" title="issues" href={ (base) "/issues.atom.xml" };
+            link rel="alternate" type="application/atom+xml" title="releases" href={ (base) "/releases.atom.xml" };
+            meta property="og:title" content={ (self.repo.owner) "/" (self.repo.name) };
+            meta property="og:description" content=(desc);
+        };
+        ui::page_head(&t, self.viewer.as_ref(), body, head).into_response()
     }
     pub fn open(&self) -> Result<gix::Repository, Err> {
         Ok(git::open(&self.dir)?)
@@ -1446,12 +1469,14 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::issues_web::routes())
         .merge(crate::pulls_web::routes())
         .merge(crate::api::routes())
+        .merge(crate::feeds::routes())
         .merge(crate::social_web::routes())
         .merge(crate::releases::routes())
         .merge(crate::lfs::routes())
         .merge(crate::ops::routes())
         .fallback(fallback)
         .layer(middleware::from_fn(same_origin))
+        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(app.clone(), crate::ops::count))
         .layer(middleware::from_fn_with_state(app.clone(), crate::ops::rate_limit))
         .layer(middleware::from_fn(crate::ops::compress))

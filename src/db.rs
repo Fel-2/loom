@@ -390,6 +390,19 @@ CREATE TABLE mail_outbox (
 CREATE INDEX mail_due ON mail_outbox(sent, id);
 ";
 
+/// v8: draft pull requests; issue/PR reactions.
+const SCHEMA_V8: &str = "
+ALTER TABLE pulls ADD COLUMN draft INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE reactions (
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created INTEGER NOT NULL,
+    PRIMARY KEY (issue_id, user_id, name)
+);
+CREATE INDEX reactions_issue ON reactions(issue_id);
+";
+
 pub const DEFAULT_LABELS: &[(&str, &str, &str)] = &[
     ("bug", "#d73a4a", "Something is broken"),
     ("enhancement", "#84b6eb", "New feature or request"),
@@ -597,6 +610,9 @@ impl Db {
         }
         if v < 7 {
             c.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
+        }
+        if v < 8 {
+            c.execute_batch(&format!("BEGIN; {SCHEMA_V8} PRAGMA user_version = 8; COMMIT;"))?;
         }
         Ok(Db(Mutex::new(c)))
     }
@@ -1304,5 +1320,111 @@ impl Db {
 
     pub fn repo_count(&self, owner: &str) -> Result<i64> {
         self.c().query_row("SELECT COUNT(*) FROM repos WHERE owner = ?1", [owner], |r| r.get(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct Tmp(PathBuf);
+
+    impl Tmp {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("loom-db-test-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_file(&p);
+            let _ = std::fs::remove_file(p.with_extension("db-wal"));
+            let _ = std::fs::remove_file(p.with_extension("db-shm"));
+            Tmp(p)
+        }
+        fn db(&self) -> Db {
+            Db::open(&self.0).expect("open db")
+        }
+    }
+
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(self.0.with_extension("db-wal"));
+            let _ = std::fs::remove_file(self.0.with_extension("db-shm"));
+        }
+    }
+
+    #[test]
+    fn access_matrix() {
+        let t = Tmp::new("access");
+        let db = t.db();
+        let owner = db.create_user("owner", "", None, false).expect("user");
+        let member = db.create_user("member", "", None, false).expect("user");
+        let reader = db.create_user("reader", "", None, false).expect("user");
+        let writer = db.create_user("writer", "", None, false).expect("user");
+        db.create_user("nobody", "", None, false).expect("user");
+        db.create_user("admin", "", None, true).expect("user");
+
+        let pub_id = db.create_repo("owner", "pub", "", false).expect("repo");
+        let priv_id = db.create_repo("owner", "priv", "", true).expect("repo");
+        let pub_repo = db.repo_by_id(pub_id).unwrap().unwrap();
+        let priv_repo = db.repo_by_id(priv_id).unwrap().unwrap();
+
+        let check = |u: Option<&User>, r: &Repo, want: Access| {
+            assert_eq!(db.access(u, r).unwrap(), want, "{:?} on {}/{}", u.map(|u| u.name.clone()), r.owner, r.name);
+        };
+
+        check(None, &pub_repo, Access::Read);
+        check(None, &priv_repo, Access::None);
+        check(db.user_by_name("owner").unwrap().as_ref(), &priv_repo, Access::Admin);
+        check(db.user_by_name("nobody").unwrap().as_ref(), &pub_repo, Access::Read);
+        check(db.user_by_name("nobody").unwrap().as_ref(), &priv_repo, Access::None);
+        check(db.user_by_name("admin").unwrap().as_ref(), &priv_repo, Access::Admin);
+
+        db.set_collaborator(priv_id, writer, Access::Write).unwrap();
+        db.set_collaborator(priv_id, reader, Access::Read).unwrap();
+        check(db.user_by_name("writer").unwrap().as_ref(), &priv_repo, Access::Write);
+        check(db.user_by_name("reader").unwrap().as_ref(), &priv_repo, Access::Read);
+        // Grants are per-repo: on the public repo they are plain readers.
+        check(db.user_by_name("writer").unwrap().as_ref(), &pub_repo, Access::Read);
+        check(db.user_by_name("reader").unwrap().as_ref(), &pub_repo, Access::Read);
+
+        let org = db.create_org("org", "", owner).unwrap();
+        db.create_repo("org", "team", "", true).unwrap();
+        let team_repo = db.repo("org", "team").unwrap().unwrap();
+        let team = db.create_team(org, "devs", "").unwrap();
+        db.set_team_member(team, writer, Access::Write).unwrap();
+        db.grant_team_repo(team, team_repo.id, Access::Write).unwrap();
+        db.set_member(org, member, Access::Read).unwrap();
+        // Team grant beats the (lower) org membership role; org read-only members only read.
+        check(db.user_by_name("writer").unwrap().as_ref(), &team_repo, Access::Write);
+        check(db.user_by_name("member").unwrap().as_ref(), &team_repo, Access::Read);
+        check(db.user_by_name("reader").unwrap().as_ref(), &team_repo, Access::None);
+        check(db.user_by_name("nobody").unwrap().as_ref(), &team_repo, Access::None);
+    }
+
+    #[test]
+    fn tokens_and_sessions_hash_at_rest() {
+        let t = Tmp::new("tokens");
+        let db = t.db();
+        let uid = db.create_user("u", "", None, false).unwrap();
+        let raw = db.create_token(uid, "t").unwrap();
+        assert!(raw.starts_with("loom_"));
+        assert_eq!(db.token_user(&raw).unwrap().unwrap().id, uid);
+        assert!(db.token_user("loom_wrong").unwrap().is_none());
+        assert!(db.tokens(uid).unwrap()[0].last_used.is_some(), "last_used is recorded");
+        let sess = db.create_session(uid).unwrap();
+        assert_eq!(db.session_user(&sess).unwrap().unwrap().id, uid);
+        assert_ne!(
+            db.c().query_row::<String, _, _>("SELECT hash FROM sessions LIMIT 1", [], |r| r.get(0)).unwrap(),
+            sess,
+            "the stored session is the hash, not the cookie value"
+        );
+    }
+
+    #[test]
+    fn valid_name_rejects_route_and_git_suffixes() {        assert!(valid_name("a-b_2.x"));
+        assert!(!valid_name("repo.git"));
+        assert!(!valid_name("-lead"));
+        assert!(!valid_name(""));
+        assert!(!valid_name("settings"));
+        assert!(!valid_name(&"x".repeat(65)));
     }
 }

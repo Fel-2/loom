@@ -297,3 +297,11 @@ svg.avatar { border-radius: 50%; vertical-align: -4px; margin-right: .35rem; }
 header.top a svg.avatar { margin-right: .15rem; }
 span.last-commit { float: right; color: var(--muted); font-family: var(--mono); font-size: .75rem; }
 pre.graph { padding: 1rem 1.25rem; font-size: .8rem; line-height: 1.45; overflow-x: auto; color: var(--muted); }
+
+/* reactions */
+div.reactions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; padding: .35rem 1rem .6rem; }
+div.reactions form { display: inline; margin: 0; }
+button.reaction, span.reaction { font: inherit; font-family: var(--mono); font-size: .8rem; padding: .1rem .5rem; border: 1px solid var(--line); border-radius: 999px; background: var(--card); cursor: pointer; }
+button.reaction:hover { background: var(--hover); }
+.reaction.mine { border-color: var(--accent); }
+div.reactions select { font: inherit; font-size: .8rem; padding: .1rem .3rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--card); color: var(--fg); }

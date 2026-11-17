@@ -42,7 +42,7 @@ fn head_info(app: &App, ctx: &Ctx, pull: &Pull) -> Head {
     Head { repo, label }
 }
 
-fn load_pull(app: &App, ctx: &Ctx, number: i64) -> Result<(Issue, Pull), Err> {
+pub(crate) fn load_pull(app: &App, ctx: &Ctx, number: i64) -> Result<(Issue, Pull), Err> {
     let issue = app.db.issue(ctx.repo.id, number)?.filter(|i| i.is_pr).ok_or(Err::NotFound)?;
     let pull = app.db.pull(ctx.repo.id, number)?.ok_or(Err::NotFound)?;
     Ok((issue, pull))
@@ -228,22 +228,27 @@ pub fn render_pull(app: &Arc<App>, ctx: &Ctx, issue: Issue, msg: Option<&str>, e
     let (statuses, required, failing) = failing_checks(app, &ctx.repo, &pull);
     let blocked = if !failing.is_empty() {
         Some(format!("Required checks must pass first: {}.", failing.join(", ")))
+    } else if pull.draft && !issue.closed {
+        Some("Draft pull request: mark it ready for review to merge.".into())
     } else if !triage && !issue.closed {
         Some("Only people with write access can merge.".into())
     } else {
         None
     };
+    let is_author = viewer.is_some_and(|u| Some(u.id) == issue.author_id);
+    let can_toggle_draft = !issue.closed && !ctx.repo.archived && (is_author || triage);
     let mb = uip::MergeBox {
         pbase: &pbase,
         pull: &pull,
         state,
-        can_merge: triage && !ctx.repo.archived && failing.is_empty(),
+        can_merge: triage && !ctx.repo.archived && failing.is_empty() && !pull.draft,
         blocked_reason: blocked,
         checks: crate::ui_social::statuses(&statuses, &required),
         can_delete_branch,
         head_exists,
         approvals: latest.iter().filter(|(_, s)| s == "approve").count(),
         changes_requested: latest.iter().filter(|(_, s)| s == "changes").count(),
+        can_toggle_draft,
     };
     let is_author = viewer.is_some_and(|u| Some(u.id) == issue.author_id);
     let review_form = (viewer.is_some() && !issue.closed && !ctx.repo.archived).then(|| uip::review_form(&pbase, is_author));
@@ -381,7 +386,7 @@ struct CompareQ {
 }
 
 /// Resolve a head spec: "branch" (this repo) or "owner/repo:branch" (a fork).
-fn resolve_head(app: &App, viewer: Option<&User>, base_repo: &Repo, spec: &str) -> Option<(Repo, String)> {
+pub(crate) fn resolve_head(app: &App, viewer: Option<&User>, base_repo: &Repo, spec: &str) -> Option<(Repo, String)> {
     let (repo, branch) = match spec.split_once(':') {
         Some((full, branch)) => {
             let (o, n) = full.split_once('/')?;
@@ -465,9 +470,9 @@ fn compare_data(app: &App, ctx: &Ctx, base_branch: &str, head_spec: &str) -> Res
     }
     let base_tip = gitops::branch_sha(&ctx.dir, base_branch).ok_or(format!("No branch '{base_branch}' here."))?;
     let (head_repo, head_branch) = resolve_head(app, viewer, &ctx.repo, head_spec).ok_or("Unknown head. Use a branch of this repo or of one of its forks.")?;
-    let head_sha = stage_head(app, ctx, &head_repo, &head_branch)?;
+    let head_sha = stage_head(app, &ctx.dir, &ctx.repo, &head_repo, &head_branch)?;
     let Some(mb) = gitops::merge_base(&ctx.dir, &base_tip, &head_sha) else {
-        unstage(ctx, &head_repo, &head_branch);
+        unstage(&ctx.dir, &ctx.repo, &head_repo, &head_branch);
         return Err("These branches share no history.".into());
     };
     let repo = crate::git::open(&ctx.dir).map_err(|_| "cannot open repository")?;
@@ -481,22 +486,22 @@ fn compare_data(app: &App, ctx: &Ctx, base_branch: &str, head_spec: &str) -> Res
         (Some(b), Some(h)) => crate::git::diff_commits(&repo, Some(b), h).unwrap_or_default(),
         _ => Vec::new(),
     };
-    unstage(ctx, &head_repo, &head_branch);
+    unstage(&ctx.dir, &ctx.repo, &head_repo, &head_branch);
     let existing = app.db.open_pull_for(ctx.repo.id, head_repo.id, &head_branch, base_branch).map_err(|e| e.to_string())?;
     Ok((commits, files, existing))
 }
 
 /// Head commit available in the base repo: same repo -> branch tip; fork ->
 /// fetched into `refs/loom/compare/<fork-id>/<branch>`.
-fn stage_head(app: &App, ctx: &Ctx, head_repo: &Repo, branch: &str) -> Result<String, String> {
-    if head_repo.id == ctx.repo.id {
-        return gitops::branch_sha(&ctx.dir, branch).ok_or(format!("No branch '{branch}' here."));
+pub(crate) fn stage_head(app: &App, dir: &std::path::Path, base: &Repo, head_repo: &Repo, branch: &str) -> Result<String, String> {
+    if head_repo.id == base.id {
+        return gitops::branch_sha(dir, branch).ok_or(format!("No branch '{branch}' here."));
     }
     let src: PathBuf = app.repo_dir(head_repo);
     gitops::branch_sha(&src, branch).ok_or(format!("No branch '{branch}' in {}/{}.", head_repo.owner, head_repo.name))?;
     let scratch = scratch_ref(head_repo, branch);
-    gitops::fetch_branch(&ctx.dir, &src, branch, &scratch)?;
-    gitops::rev_parse(&ctx.dir, &scratch).ok_or_else(|| "fetch failed".into())
+    gitops::fetch_branch(dir, &src, branch, &scratch)?;
+    gitops::rev_parse(dir, &scratch).ok_or_else(|| "fetch failed".into())
 }
 
 fn scratch_ref(head_repo: &Repo, branch: &str) -> String {
@@ -505,9 +510,9 @@ fn scratch_ref(head_repo: &Repo, branch: &str) -> String {
 
 /// Drop the scratch ref: a fork's commits must not stay reachable (and
 /// fetchable) in the base repo just because someone looked at a compare.
-fn unstage(ctx: &Ctx, head_repo: &Repo, branch: &str) {
-    if head_repo.id != ctx.repo.id {
-        gitops::drop_ref(&ctx.dir, &scratch_ref(head_repo, branch));
+pub(crate) fn unstage(dir: &std::path::Path, base: &Repo, head_repo: &Repo, branch: &str) {
+    if head_repo.id != base.id {
+        gitops::drop_ref(dir, &scratch_ref(head_repo, branch));
     }
 }
 
@@ -522,6 +527,67 @@ struct NewPrF {
     head: String,
     title: String,
     body: String,
+    draft: Option<String>,
+}
+
+/// What `create_pr` needs, shared by the web form and the API.
+pub(crate) struct NewPr<'a> {
+    pub base: &'a str,
+    pub head: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub draft: bool,
+}
+
+pub(crate) enum CreatedPr {
+    Exists(i64),
+    Created(i64),
+}
+
+/// Validate and open a PR. Blocking. The caller renders or JSONifies the error.
+pub(crate) fn create_pr(app: &App, viewer: &User, repo: &Repo, dir: &std::path::Path, f: &NewPr) -> Result<CreatedPr, String> {
+    if f.title.trim().is_empty() || f.title.chars().count() > 256 {
+        return Err("A title (max 256 characters) is required.".into());
+    }
+    if f.body.len() > 65536 {
+        return Err("The description is too long.".into());
+    }
+    let Some((head_repo, head_branch)) = resolve_head(app, Some(viewer), repo, f.head) else {
+        return Err("Unknown head. Use a branch of this repo or of one of its forks.".into());
+    };
+    if head_repo.id == repo.id && head_branch == f.base {
+        return Err("Head and base are the same branch.".into());
+    }
+    let Some(base_tip) = gitops::branch_sha(dir, &f.base) else { return Err("Unknown base branch.".into()) };
+    let head_sha = stage_head(app, dir, repo, &head_repo, &head_branch)?;
+    let mb = gitops::merge_base(dir, &base_tip, &head_sha);
+    let ahead = mb.as_ref().is_some_and(|mb| !gitops::rev_list(dir, mb, &head_sha, 1).is_empty());
+    let existing = app.db.open_pull_for(repo.id, head_repo.id, &head_branch, &f.base).map_err(|e| e.to_string())?;
+    if existing.is_some() || mb.is_none() || !ahead {
+        unstage(dir, repo, &head_repo, &head_branch);
+    }
+    if let Some(n) = existing {
+        return Ok(CreatedPr::Exists(n));
+    }
+    let Some(mb) = mb else { return Err("These branches share no history.".into()) };
+    if !ahead {
+        return Err("Nothing to merge: the base already has these commits.".into());
+    }
+    let (_, number) = app
+        .db
+        .create_pull(repo.id, viewer.id, f.title.trim(), f.body, head_repo.id, &head_branch, &f.base, &head_sha, &mb, f.draft)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = gitops::force_ref(dir, &format!("refs/pull/{number}/head"), &head_sha) {
+        eprintln!("pin PR #{number}: {e}");
+    }
+    unstage(dir, repo, &head_repo, &head_branch);
+    if let Ok(Some(issue)) = app.db.issue(repo.id, number) {
+        issues_web::record_mentions(app, viewer, repo, &issue, f.body);
+        if let Ok(Some(p)) = app.db.pull(repo.id, number) {
+            crate::events::emit(&app.bus(), crate::events::Ev::Pull { repo, actor: Some(viewer), issue: &issue, pull: &p, action: "opened" });
+        }
+    }
+    Ok(CreatedPr::Created(number))
 }
 
 async fn create(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(String, String)>, Form(f): Form<NewPrF>) -> Res {
@@ -531,50 +597,13 @@ async fn create(State(app): St, Authed(u): Authed, Path((owner, name)): Path<(St
     }
     blocking(move || {
         let q = CompareQ { base: Some(f.base.clone()), head: Some(f.head.clone()) };
-        let fail = |e: &str| compare_page(&app, &ctx, &q, &f.title, &f.body, Some(e));
-        if f.title.trim().is_empty() || f.title.chars().count() > 256 {
-            return fail("A title (max 256 characters) is required.");
-        }
-        if f.body.len() > 65536 {
-            return fail("The description is too long.");
-        }
-        let Some((head_repo, head_branch)) = resolve_head(&app, Some(&u), &ctx.repo, &f.head) else {
-            return fail("Unknown head branch.");
-        };
-        if head_repo.id == ctx.repo.id && head_branch == f.base {
-            return fail("Head and base are the same branch.");
-        }
-        let Some(base_tip) = gitops::branch_sha(&ctx.dir, &f.base) else { return fail("Unknown base branch.") };
-        let head_sha = match stage_head(&app, &ctx, &head_repo, &head_branch) {
-            Ok(s) => s,
-            Err(e) => return fail(&e),
-        };
-        let mb = gitops::merge_base(&ctx.dir, &base_tip, &head_sha);
-        let ahead = mb.as_ref().is_some_and(|mb| !gitops::rev_list(&ctx.dir, mb, &head_sha, 1).is_empty());
-        let existing = app.db.open_pull_for(ctx.repo.id, head_repo.id, &head_branch, &f.base)?;
-        if existing.is_some() || mb.is_none() || !ahead {
-            unstage(&ctx, &head_repo, &head_branch);
-        }
-        if let Some(n) = existing {
-            return Ok(see_other(&format!("{}/pulls/{n}", ctx.base())));
-        }
-        let Some(mb) = mb else { return fail("These branches share no history.") };
-        if !ahead {
-            return fail("Nothing to merge: the base already has these commits.");
-        }
-        let (issue_id, number) = app.db.create_pull(ctx.repo.id, u.id, f.title.trim(), &f.body, head_repo.id, &head_branch, &f.base, &head_sha, &mb)?;
-        if let Err(e) = gitops::force_ref(&ctx.dir, &format!("refs/pull/{number}/head"), &head_sha) {
-            eprintln!("pin PR #{number}: {e}");
-        }
-        unstage(&ctx, &head_repo, &head_branch);
-        if let Some(issue) = app.db.issue(ctx.repo.id, number)? {
-            issues_web::record_mentions(&app, &u, &ctx.repo, &issue, &f.body);
-            if let Some(p) = app.db.pull(ctx.repo.id, number)? {
-                crate::events::emit(&app.bus(), crate::events::Ev::Pull { repo: &ctx.repo, actor: Some(&u), issue: &issue, pull: &p, action: "opened" });
+        let core = NewPr { base: &f.base, head: &f.head, title: &f.title, body: &f.body, draft: f.draft.is_some() };
+        match create_pr(&app, &u, &ctx.repo, &ctx.dir, &core) {
+            Ok(CreatedPr::Created(number)) | Ok(CreatedPr::Exists(number)) => {
+                Ok(see_other(&format!("{}/pulls/{number}", ctx.base())))
             }
+            Err(e) => compare_page(&app, &ctx, &q, &f.title, &f.body, Some(&e)),
         }
-        let _ = issue_id;
-        Ok(see_other(&format!("{}/pulls/{number}", ctx.base())))
     })
     .await
 }
@@ -672,9 +701,11 @@ async fn inline_delete(State(app): St, Authed(u): Authed, Path((owner, name, num
 // ---------- merge ----------
 
 #[derive(Deserialize)]
-struct MergeF {
-    strategy: String,
-    expected_head: String,
+pub(crate) struct MergeF {
+    pub(crate) strategy: String,
+    /// The head the review was based on; refuses the merge if it moved. The
+    /// web form always sends it; the API may omit it.
+    pub(crate) expected_head: Option<String>,
 }
 
 async fn merge(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>, Form(f): Form<MergeF>) -> Res {
@@ -692,11 +723,14 @@ async fn merge(State(app): St, Authed(u): Authed, Path((owner, name, number)): P
     .await
 }
 
-fn do_merge(app: &App, ctx: &Ctx, u: &User, issue: &Issue, pull: &Pull, f: &MergeF) -> Result<(), String> {
+pub(crate) fn do_merge(app: &App, ctx: &Ctx, u: &User, issue: &Issue, pull: &Pull, f: &MergeF) -> Result<(), String> {
     if issue.closed {
         return Err("This pull request is closed.".into());
     }
-    if f.expected_head != pull.head_sha {
+    if pull.draft {
+        return Err("This pull request is still a draft; mark it ready for review first.".into());
+    }
+    if f.expected_head.as_deref().is_some_and(|h| h != pull.head_sha) {
         return Err("The pull request changed while you were looking at it. Review the new commits, then merge.".into());
     }
     let (_, _, failing) = failing_checks(app, &ctx.repo, pull);
@@ -754,8 +788,38 @@ fn do_merge(app: &App, ctx: &Ctx, u: &User, issue: &Issue, pull: &Pull, f: &Merg
     Ok(())
 }
 
-async fn delete_branch(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>) -> Res {
+// ---------- draft <-> ready ----------
+
+async fn draft_set(app: Arc<App>, u: User, owner: String, name: String, number: i64, to: bool) -> Res {
     let ctx = Ctx::load(&app, Some(u.clone()), &owner, &name)?;
+    blocking(move || {
+        let (issue, pull) = load_pull(&app, &ctx, number)?;
+        let is_author = Some(u.id) == issue.author_id;
+        if !is_author && ctx.access < Access::Write {
+            return render_pull(&app, &ctx, issue, None, Some("Only the author or people with write access can change this."));
+        }
+        if to && !is_author {
+            return render_pull(&app, &ctx, issue, None, Some("Only the author can return a pull request to draft."));
+        }
+        if pull.merged || issue.closed {
+            return render_pull(&app, &ctx, issue, None, Some("This pull request is closed."));
+        }
+        app.db.set_pull_draft(pull.issue_id, to)?;
+        let _ = app.db.add_event(issue.id, Some(u.id), "draft", if to { "draft" } else { "ready" }, None);
+        Ok(see_other(&format!("{}/pulls/{number}", ctx.base())))
+    })
+    .await
+}
+
+async fn ready(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>) -> Res {
+    draft_set(app, u, owner, name, number, false).await
+}
+
+async fn to_draft(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>) -> Res {
+    draft_set(app, u, owner, name, number, true).await
+}
+
+async fn delete_branch(State(app): St, Authed(u): Authed, Path((owner, name, number)): Path<(String, String, i64)>) -> Res {    let ctx = Ctx::load(&app, Some(u.clone()), &owner, &name)?;
     blocking(move || {
         let (issue, pull) = load_pull(&app, &ctx, number)?;
         let head = head_info(&app, &ctx, &pull);
@@ -788,5 +852,7 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/pulls/{number}/revisions", get(revisions))
         .route("/{owner}/{name}/pulls/{number}/review", post(review))
         .route("/{owner}/{name}/pulls/{number}/merge", post(merge))
+        .route("/{owner}/{name}/pulls/{number}/ready", post(ready))
+        .route("/{owner}/{name}/pulls/{number}/draft", post(to_draft))
         .route("/{owner}/{name}/pulls/{number}/delete-branch", post(delete_branch))
 }

@@ -6,6 +6,11 @@ use crate::db::{Access, Collaborator, Member, Owner, Protection, Repo, SshKey, T
 use crate::git::{CommitInfo, Entry, FileDiff, Line, RefInfo};
 
 pub fn page(title: &str, viewer: Option<&User>, body: Markup) -> Markup {
+    page_head(title, viewer, body, html! {})
+}
+
+/// `page` with extra `<head>` content (feed links, OpenGraph tags).
+pub fn page_head(title: &str, viewer: Option<&User>, body: Markup, head_extra: Markup) -> Markup {
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -14,6 +19,7 @@ pub fn page(title: &str, viewer: Option<&User>, body: Markup) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " · loom" }
                 link rel="stylesheet" href="/static/style.css";
+                (head_extra)
             }
             body {
                 header.top {

@@ -97,6 +97,7 @@ pub fn list(d: &ListData<'_>) -> Markup {
                         div.issue-main {
                             div {
                                 a.issue-title href={ (d.base) "/" (d.kind) "/" (i.number) } { (i.title) }
+                                @if i.draft { " " span.badge.warn { "draft" } }
                                 @for l in &i.labels { " " (label_chip(l, Some(&format!("{}/{}?label={}", d.base, d.kind, crate::web::urlencode(&l.name))))) }
                             }
                             div.meta {
@@ -159,6 +160,8 @@ pub struct ShowData<'a> {
     pub can_triage: bool,
     pub can_close: bool,
     pub archived: bool,
+    /// (token, count, mine) — the viewer's emoji reactions on the issue itself.
+    pub reactions: Vec<(String, i64, bool)>,
     pub msg: Option<&'a str>,
     pub err: Option<&'a str>,
     /// PR pages: replaces the issue title block (title, state, sub-tabs).
@@ -167,6 +170,49 @@ pub struct ShowData<'a> {
     pub merge_box: Option<Markup>,
     /// PR pages: reviewers etc. at the top of the sidebar.
     pub extra_side: Option<Markup>,
+}
+
+pub fn reaction_emoji(name: &str) -> &'static str {
+    match name {
+        "+1" => "👍",
+        "-1" => "👎",
+        "laugh" => "😄",
+        "confused" => "😕",
+        "heart" => "❤️",
+        "hooray" => "🎉",
+        "rocket" => "🚀",
+        _ => "👀",
+    }
+}
+
+fn reactions_row(ibase: &str, d: &ShowData<'_>) -> Markup {
+    let can_react = d.signed_in && !d.archived;
+    html! {
+        @if !d.reactions.is_empty() || can_react {
+            div.reactions {
+                @for (name, count, mine) in &d.reactions {
+                    form.inline method="post" action={ (ibase) "/react" } {
+                        input type="hidden" name="name" value=(name);
+                        @if can_react {
+                            button.reaction class=[(*mine).then_some("mine")] title="toggle" { (reaction_emoji(name)) " " (count) }
+                        } @else {
+                            span.reaction class=[(*mine).then_some("mine")] { (reaction_emoji(name)) " " (count) }
+                        }
+                    }
+                }
+                @if can_react {
+                    form.inline method="post" action={ (ibase) "/react" } {
+                        select name="name" aria-label="add reaction" {
+                            @for n in crate::issues_db::REACTIONS {
+                                @if !d.reactions.iter().any(|(x, _, _)| x == n) { option value=(n) { (reaction_emoji(n)) } }
+                            }
+                        }
+                        button.btn.small-btn { "+" }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn who(_base: &str, name: &Option<String>) -> Markup {
@@ -207,6 +253,7 @@ pub fn show(d: &ShowData<'_>) -> Markup {
                     }
                     div.prose.pad { @if i.body.is_empty() { p.muted { em { "No description." } } } @else { (d.body_html) } }
                 }
+                (reactions_row(&ibase, d))
                 @for item in &d.items {
                     @match item {
                         Item::Comment { c, html, can_edit, can_delete } => {

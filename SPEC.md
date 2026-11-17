@@ -153,3 +153,15 @@ email notifications via `LOOM_MAIL_CMD` (no SMTP code in loom), `loom lfs gc`
 Fixed along the way: repo row ids are reused after deletion, so delete now
 drops the repo's LFS objects and release assets; GC enumerates objects without
 deadlocking on pipe buffers. tests/m9.sh: 42 checks.
+
+## 11. Migration, feeds, hardening
+
+Draft pull requests (merge refused until ready; author can flip back), emoji
+reactions on issues/PRs, Atom feeds for commits/issues/releases (token or
+cookie auth for private repos), a CSP that denies scripts, the API v1 surface
+needed to migrate (issue PATCH, labels/milestones/releases/hooks CRUD, PR
+create/merge), `loom token add` for scripts, Forgejo import extended to
+issues/labels/milestones/release notes (m10 runs it against a stub Gitea),
+an aarch64 static tarball, and `bench/guard.sh` keeping idle RSS under a
+budget in CI. Schema v8 (pulls.draft, reactions). Measured after the pass:
+13 MB idle after a load burst (guard.sh, laptop fixture).
