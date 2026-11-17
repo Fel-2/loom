@@ -70,7 +70,7 @@ if [ -n "$TGZ" ]; then
     tar -C "$W" -xzf "$TGZ"
     BIN=$(ls "$W"/loom-*-linux-*/loom | head -1)
     check "the tarball holds a static binary"    bash -c "file '$BIN' | grep -qE 'static(-pie)? linked'"
-    check "  it runs and reports its version"    bash -c "'$BIN' version | grep -q '^loom 0.1'"
+    check "  it runs and reports its version"    bash -c "'$BIN' version | grep -q '^loom 0\.'"
     check "  tarball includes the installer"     bash -c "[ -f '$(dirname "$BIN")/deploy/install.sh' ] && [ -f '$(dirname "$BIN")/docs/home-laptop.md' ] || [ -f '$(dirname "$BIN")/README-HOME.md' ]"
 else
     echo "  (no dist/ tarball yet: run scripts/dist.sh)"

@@ -41,7 +41,7 @@ highlighting when the benchmark ran. Those rows are marked as not comparable in
 [`bench/results/SUMMARY.md`](bench/results/SUMMARY.md), which also carries the
 method and the raw output, so the comparison can be judged instead of believed.
 
-**Status: 0.1.0.** The web UI, git transport (HTTP + SSH), issues, pull
+**Status: 0.2.0.** The web UI, git transport (HTTP + SSH), issues, pull
 requests, LFS, releases and the REST API work and are covered by tests. Treat it
 as a single-user/LAN forge, not a hardened multi-tenant service: there is no
 federation, no built-in CI runner and no package registry. See

@@ -34,19 +34,21 @@ jobs:
         run: ./scripts/make-test-bundle.sh
       - name: start it
         run: |
-          cp -a dist/loom-project-0.1.0/test-data data-run
+          echo "BUNDLE=$PWD/$(ls -d dist/loom-project-*)" >> "$GITHUB_ENV"
+          BUNDLE=$(ls -d dist/loom-project-*)
+          cp -a "$BUNDLE/test-data" data-run
           LOOM_DATA="$PWD/data-run" LOOM_ADDR=127.0.0.1:3917 LOOM_SSH_ADDR=127.0.0.1:2917 \
             LOOM_URL=http://127.0.0.1:3917 LOOM_SSH_HOST=127.0.0.1:2917 \
-            dist/loom-project-0.1.0/loom serve >serve.log 2>&1 &
+            "$BUNDLE/loom" serve >serve.log 2>&1 &
           for _ in $(seq 60); do curl -sf http://127.0.0.1:3917/healthz >/dev/null && exit 0; sleep 0.5; done
           echo "server did not come up"; cat serve.log; exit 1
       - name: integration suites
         env:
-          LOOM: ${{ github.workspace }}/dist/loom-project-0.1.0/loom
+          LOOM: ${{ env.BUNDLE }}/loom
           LOOM_DATA: ${{ github.workspace }}/data-run
           LOOM_TEST_URL: http://127.0.0.1:3917
           LOOM_TEST_SSH_PORT: "2917"
-          KEYS: ${{ github.workspace }}/dist/loom-project-0.1.0/test-keys
+          KEYS: ${{ env.BUNDLE }}/test-keys
         run: |
           set -e
           for suite in smoke m3 m4 m5 m6 m7 m8 m9 m10; do
@@ -79,7 +81,7 @@ jobs:
         run: |
           ARCH=aarch64 ./scripts/dist.sh
           file dist/loom-*-linux-aarch64/loom | grep -q 'aarch64'
-          tar -tzf dist/loom-0.1.0-linux-aarch64.tar.gz | grep -q 'deploy/install.sh'
+          tar -tzf dist/loom-*-linux-aarch64.tar.gz | grep -q 'deploy/install.sh'
       - uses: actions/upload-artifact@v4
         with:
           name: loom-aarch64

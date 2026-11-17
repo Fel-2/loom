@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-17
 
-Migration and hardening pass after 0.1.0.
+Migration and hardening pass after 0.1.0. Same database: the schema
+migrates in place on first start (v8).
 
 - **Migration**: `scripts/import-forgejo.sh --issues --releases` now copies
   labels, milestones, issues (with comments, state and PRs excluded),

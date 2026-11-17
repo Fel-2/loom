@@ -27,16 +27,17 @@ bundle, which seeds users, keys and fixture repositories:
 
 ```sh
 ./scripts/make-test-bundle.sh
-cp -a dist/loom-project-0.1.0/test-data data-run
+BUNDLE=$(ls -d dist/loom-project-*)
+cp -a "$BUNDLE/test-data" data-run
 LOOM_DATA=$PWD/data-run LOOM_ADDR=127.0.0.1:3917 LOOM_SSH_ADDR=127.0.0.1:2917 \
   LOOM_URL=http://127.0.0.1:3917 LOOM_SSH_HOST=127.0.0.1:2917 \
-  dist/loom-project-0.1.0/loom serve &
+  "$BUNDLE/loom" serve &
 
-export LOOM=$PWD/dist/loom-project-0.1.0/loom
+export LOOM=$PWD/$BUNDLE/loom
 export LOOM_DATA=$PWD/data-run
 export LOOM_TEST_URL=http://127.0.0.1:3917
 export LOOM_TEST_SSH_PORT=2917
-export KEYS=$PWD/dist/loom-project-0.1.0/test-keys
+export KEYS=$PWD/$BUNDLE/test-keys
 for suite in smoke m3 m4 m5 m6 m7 m8 m9 m10; do ./tests/$suite.sh; done
 ```
 
