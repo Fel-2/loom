@@ -18,6 +18,20 @@ as a single-user/LAN forge, not a hardened multi-tenant service: there is no
 federation, no built-in CI runner and no package registry. See
 [SECURITY.md](SECURITY.md) for the threat model before exposing it.
 
+## Screenshots
+
+Every page is server-rendered HTML; no JavaScript is needed to browse, file an
+issue or merge a pull request.
+
+Repository overview — tree, recent commits, rendered README:
+
+![repository overview](docs/screenshots/overview.png)
+
+Commits, and a single commit with its diff:
+
+![commits](docs/screenshots/commits.png)
+![commit view](docs/screenshots/commit.png)
+
 ## What it does
 
 - **Browse**: tree, blob (with a small built-in syntax highlighter), raw, log,
