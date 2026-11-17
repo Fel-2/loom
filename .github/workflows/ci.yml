@@ -34,8 +34,9 @@ jobs:
         run: ./scripts/make-test-bundle.sh
       - name: start it
         run: |
-          echo "BUNDLE=$PWD/$(ls -d dist/loom-project-*)" >> "$GITHUB_ENV"
-          BUNDLE=$(ls -d dist/loom-project-*)
+          BUNDLE=$(find dist -maxdepth 1 -type d -name 'loom-project-*' | head -1)
+          [ -d "$BUNDLE" ] || { echo "no bundle directory under dist/"; exit 1; }
+          echo "BUNDLE=$PWD/$BUNDLE" >> "$GITHUB_ENV"
           cp -a "$BUNDLE/test-data" data-run
           LOOM_DATA="$PWD/data-run" LOOM_ADDR=127.0.0.1:3917 LOOM_SSH_ADDR=127.0.0.1:2917 \
             LOOM_URL=http://127.0.0.1:3917 LOOM_SSH_HOST=127.0.0.1:2917 \
