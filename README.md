@@ -9,6 +9,12 @@ Measured against Forgejo 15.0.6 with SQLite on the same data (83k-commit
 ~1,180 vs 49 requests/s under 32 clients, 15 MB RSS after load.
 Full numbers and method: [`bench/results/SUMMARY.md`](bench/results/SUMMARY.md).
 
+**Status: 0.1.0.** The web UI, git transport (HTTP + SSH), issues, pull
+requests, LFS, releases and the REST API work and are covered by tests. Treat it
+as a single-user/LAN forge, not a hardened multi-tenant service: there is no
+federation, no built-in CI runner and no package registry. See
+[SECURITY.md](SECURITY.md) for the threat model before exposing it.
+
 ## What it does
 
 - **Browse**: tree, blob (with a small built-in syntax highlighter), raw, log,
@@ -143,4 +149,8 @@ supported.)
 
 ## License
 
-MIT.
+GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Copyleft: run a modified loom for other people and the source has to stay
+available. Every dependency is Apache-2.0, MIT, ISC or BSD — all compatible with
+GPLv3, so there is no licensing asterisk on the build.
