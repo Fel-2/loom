@@ -355,16 +355,24 @@ struct NewLabel {
     description: String,
 }
 
+/// GitHub sends label colours without the leading '#'; the UI's color input
+/// always includes it. Accept both, store the canonical form.
+fn normalise_color(c: &str) -> String {
+    let c = c.trim();
+    if c.starts_with('#') { c.to_owned() } else { format!("#{c}") }
+}
+
 async fn create_label(State(app): St, ApiUser(u): ApiUser, Path((o, n)): Path<(String, String)>, Json(b): Json<NewLabel>) -> ApiRes {
     let u = u.ok_or(ApiErr(StatusCode::UNAUTHORIZED, "Requires authentication".into()))?;
     let r = repo_for(&app, Some(&u), &o, &n, Access::Write)?;
     if r.archived {
         return Err(ApiErr(StatusCode::FORBIDDEN, "Repository is archived".into()));
     }
-    if b.name.trim().is_empty() || b.name.chars().count() > 50 || !crate::issues_db::valid_color(&b.color) || b.description.len() > 200 {
-        return Err(bad("name 1-50 chars, color '#rrggbb', description at most 200 chars"));
+    let color = normalise_color(&b.color);
+    if b.name.trim().is_empty() || b.name.chars().count() > 50 || !crate::issues_db::valid_color(&color) || b.description.len() > 200 {
+        return Err(bad("name 1-50 chars, color '#rrggbb' (or 'rrggbb'), description at most 200 chars"));
     }
-    match app.db.create_label(r.id, b.name.trim(), &b.color, b.description.trim()) {
+    match app.db.create_label(r.id, b.name.trim(), &color, b.description.trim()) {
         Ok(()) => {}
         Err(crate::db::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
             return Err(ApiErr(StatusCode::CONFLICT, "A label with that name exists".into()));
@@ -378,13 +386,14 @@ async fn create_label(State(app): St, ApiUser(u): ApiUser, Path((o, n)): Path<(S
 async fn edit_label(State(app): St, ApiUser(u): ApiUser, Path((o, n, id)): Path<(String, String, i64)>, Json(b): Json<NewLabel>) -> ApiRes {
     let u = u.ok_or(ApiErr(StatusCode::UNAUTHORIZED, "Requires authentication".into()))?;
     let r = repo_for(&app, Some(&u), &o, &n, Access::Write)?;
-    if b.name.trim().is_empty() || b.name.chars().count() > 50 || !crate::issues_db::valid_color(&b.color) || b.description.len() > 200 {
-        return Err(bad("name 1-50 chars, color '#rrggbb', description at most 200 chars"));
+    let color = normalise_color(&b.color);
+    if b.name.trim().is_empty() || b.name.chars().count() > 50 || !crate::issues_db::valid_color(&color) || b.description.len() > 200 {
+        return Err(bad("name 1-50 chars, color '#rrggbb' (or 'rrggbb'), description at most 200 chars"));
     }
     if app.db.labels(r.id)?.iter().all(|l| l.id != id) {
         return Err(not_found());
     }
-    app.db.update_label(r.id, id, b.name.trim(), &b.color, b.description.trim())?;
+    app.db.update_label(r.id, id, b.name.trim(), &color, b.description.trim())?;
     let l = app.db.labels(r.id)?.into_iter().find(|l| l.id == id).ok_or_else(not_found)?;
     Ok(Json(label_json(&l)).into_response())
 }

@@ -48,7 +48,7 @@ Base: `http://your-host:3000/api/v1`
 | GET | `/repos/{owner}/{name}/pulls/{number}` | includes `head`, `base`, `merge_commit_sha`, `draft` |
 | POST | `/repos/{owner}/{name}/pulls/{number}/merge` | `{"strategy":"merge"\|"squash"\|"rebase","expected_head"}`, both optional; required checks and drafts still block |
 | GET | `/repos/{owner}/{name}/labels` | |
-| POST | `/repos/{owner}/{name}/labels` | `{"name","color":"#rrggbb","description"}`, 201; `409` on a duplicate name |
+| POST | `/repos/{owner}/{name}/labels` | `{"name","color":"#rrggbb","description"}`, 201; `409` on a duplicate name. The colour may omit the `#` (GitHub sends it that way); it is stored canonically. |
 | PATCH | `/repos/{owner}/{name}/labels/{id}` | same body as create |
 | DELETE | `/repos/{owner}/{name}/labels/{id}` | 204 |
 | GET | `/repos/{owner}/{name}/milestones` | |

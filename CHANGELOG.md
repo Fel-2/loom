@@ -25,6 +25,14 @@ migrates in place on first start (v8).
   scripts, so everything is denied except the stylesheet, forms and images
   (README badges and screenshots may live on other hosts; `<img>` cannot run
   script). `SECURITY.md` gap closed.
+- **Fixes made before this release shipped**: the first CSP denied every
+  off-host image, which broke README badges (now `img-src 'self' http: https:
+  data:`); Atom feeds escaped byte-wise and mangled non-ASCII text; the version
+  bump rewrote two unrelated crates in `Cargo.lock` to versions that do not
+  exist on crates.io, breaking every fresh build; the CI bundle step globbed the
+  tarball alongside the directory; the aarch64 build passed a non-canonical
+  platform string and ran on every push. Label colours now accept `rrggbb` as
+  well as `#rrggbb`, like GitHub.
 - **Portability**: `scripts/dist.sh` builds an aarch64 static tarball
   (`ARCH=aarch64`), and CI builds both tarballs; the runtime container
   image was already multi-arch.
