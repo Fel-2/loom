@@ -28,6 +28,7 @@ cp deploy/loom-user.service "$OUT/deploy/loom.service"
 cp deploy/loom-backup.service "$OUT/deploy/loom-backup.service"
 cp deploy/loom-backup.timer "$OUT/deploy/loom-backup.timer"
 cp deploy/install.sh "$OUT/deploy/install.sh"
+cp -a deploy/runit "$OUT/deploy/runit"
 cp README.md SPEC.md LICENSE "$OUT/" 2>/dev/null || true
 cp -r docs "$OUT/" 2>/dev/null || true
 cat > "$OUT/README-HOME.md" <<'DOC'

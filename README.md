@@ -1,5 +1,8 @@
 # loom
 
+[![ci](https://github.com/Fel-2/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/Fel-2/loom/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
+
 A self-hosted git forge in one small Rust binary. Personal/LAN use on an old
 laptop: see **[docs/home-laptop.md](docs/home-laptop.md)**. No federation, no Redis, no
 job queue, no separate database server: SQLite and git, nothing else.
