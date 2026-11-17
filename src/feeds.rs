@@ -48,17 +48,20 @@ impl FromRequestParts<Arc<App>> for FeedViewer {
 }
 
 fn esc(s: &str) -> String {
-    s.bytes().fold(String::with_capacity(s.len()), |mut o, b| {
-        match b {
-            b'&' => o.push_str("&amp;"),
-            b'<' => o.push_str("&lt;"),
-            b'>' => o.push_str("&gt;"),
-            b'"' => o.push_str("&quot;"),
-            b'\'' => o.push_str("&#39;"),
-            _ => o.push(b as char),
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '"' => o.push_str("&quot;"),
+            '\'' => o.push_str("&#39;"),
+            '\t' | '\n' | '\r' => o.push(c),
+            c if c.is_control() => {}
+            c => o.push(c),
         }
-        o
-    })
+    }
+    o
 }
 
 /// RFC 3339 (UTC) from Unix seconds. Feed readers want one timestamp format.
@@ -219,4 +222,26 @@ pub fn routes() -> Router<Arc<App>> {
         .route("/{owner}/{name}/atom.xml", get(commits))
         .route("/{owner}/{name}/issues.atom.xml", get(issues))
         .route("/{owner}/{name}/releases.atom.xml", get(releases))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_markup_and_keeps_utf8() {
+        assert_eq!(esc("a<b>c&d\"e'f"), "a&lt;b&gt;c&amp;d&quot;e&#39;f");
+        assert_eq!(esc("Pokemon — naïve ✓"), "Pokemon — naïve ✓");
+    }
+
+    #[test]
+    fn drops_bytes_xml_cannot_carry() {
+        assert_eq!(esc("tab\there\u{7}bell"), "tab\therebell");
+    }
+
+    #[test]
+    fn rfc3339_is_utc() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1763470000), "2025-11-18T12:46:40Z");
+    }
 }
