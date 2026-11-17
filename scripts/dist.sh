@@ -8,6 +8,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 ARCH=${ARCH:-x86_64}
+case "$ARCH" in
+    x86_64|amd64) PLATFORM=linux/amd64 ;;
+    aarch64|arm64) PLATFORM=linux/arm64 ;;
+    *) PLATFORM=linux/$ARCH ;;
+esac
 NAME=loom-$VERSION-linux-$ARCH
 OUT=dist/$NAME
 rm -rf "$OUT" dist/$NAME.tar.gz
@@ -16,8 +21,8 @@ mkdir -p "$OUT/deploy"
 PODMAN=${PODMAN:-podman}
 command -v "$PODMAN" >/dev/null || { echo "need $PODMAN to build the portable binary (or set PODMAN=...)"; exit 1; }
 
-echo "building static binary for $ARCH ($PODMAN)..."
-"$PODMAN" build -q --platform "linux/$ARCH" -f Dockerfile.dist -t "loom-dist:$VERSION" . >/dev/null
+echo "building static binary for $ARCH ($PODMAN, $PLATFORM)..."
+"$PODMAN" build -q --platform "$PLATFORM" -f Dockerfile.dist -t "loom-dist:$VERSION" . >/dev/null
 cid=$("$PODMAN" create "loom-dist:$VERSION")
 "$PODMAN" cp "$cid:/src/target/release/loom" "$OUT/loom" >/dev/null
 "$PODMAN" rm "$cid" >/dev/null

@@ -80,7 +80,7 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - name: aarch64 static tarball
         run: |
-          ARCH=aarch64 ./scripts/dist.sh
+          PODMAN=docker ARCH=aarch64 ./scripts/dist.sh
           file dist/loom-*-linux-aarch64/loom | grep -q 'aarch64'
           tar -tzf dist/loom-*-linux-aarch64.tar.gz | grep -q 'deploy/install.sh'
       - uses: actions/upload-artifact@v4
