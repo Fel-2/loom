@@ -7,10 +7,39 @@ A self-hosted git forge in one small Rust binary. Personal/LAN use on an old
 laptop: see **[docs/home-laptop.md](docs/home-laptop.md)**. No federation, no Redis, no
 job queue, no separate database server: SQLite and git, nothing else.
 
-Measured against Forgejo 15.0.6 with SQLite on the same data (83k-commit
-`git/git`, issues, a PR): **16.6 MB idle / 1 thread vs 239 MB / 43 threads**,
-~1,180 vs 49 requests/s under 32 clients, 15 MB RSS after load.
-Full numbers and method: [`bench/results/SUMMARY.md`](bench/results/SUMMARY.md).
+## Why this exists
+
+A 2017 i7-8550U with 8 GB of RAM and a 15 W power cap is a fine computer until
+you put a forge on it. Forgejo with SQLite idled at 239 MB and 43 threads there —
+more memory than the browser used to read it.
+
+loom is the forge I wanted on that machine: SQLite and git, one thread when
+nothing is happening, pages that render in about a millisecond, nothing else to
+keep alive. It is not trying to replace a hosted forge for a team of fifty; it is
+trying to be the thing you run on the machine you already have.
+
+## Footprint
+
+Same repositories, same host (20 cores), Forgejo 15.0.6 with SQLite and default
+settings — an 83k-commit `git/git`, an issue tracker and a pull request:
+
+| | loom | Forgejo |
+|---|---|---|
+| idle RSS / threads | **16.6 MB / 1** | 239.4 MB / 43 |
+| peak RSS, 32 concurrent clients | **87.5 MB** | 353.5 MB |
+| peak process tree, same load | 87.5 MB | 988.6 MB (58 `git` children) |
+| requests/s, 32 clients | **1,176** | 49 |
+| issue list, 1 client | **0.73 ms** | 14.6 ms |
+| API: issues | **0.29 ms** | 10.3 ms |
+| raw file | **1.8 ms** | 13.6 ms |
+| log, page 1 | **2.3 ms** | 38 ms |
+
+**Read this before quoting the numbers.** Tree and blob pages look dramatically
+faster partly because loom does less: it skips per-file "last commit" badges
+(Forgejo spends about a second on a large directory) and had no syntax
+highlighting when the benchmark ran. Those rows are marked as not comparable in
+[`bench/results/SUMMARY.md`](bench/results/SUMMARY.md), which also carries the
+method and the raw output, so the comparison can be judged instead of believed.
 
 **Status: 0.1.0.** The web UI, git transport (HTTP + SSH), issues, pull
 requests, LFS, releases and the REST API work and are covered by tests. Treat it
@@ -64,11 +93,14 @@ Commits, and a single commit with its diff:
   (off by default: they cost ~1 s per large directory), per-IP rate limiting,
   email notifications piped to your MTA, `loom lfs gc`.
 - **Integrations**: signed webhooks with retries and a delivery log, commit
-  statuses API + combined status, REST API v1 with bearer tokens,
-  notifications, activity feed, full-text search (issues/PRs/comments) and
-  code search (`git grep`).
+  statuses API + combined status, REST API v1 with bearer tokens
+  ([docs/api.md](docs/api.md)), notifications, activity feed, full-text search
+  (issues/PRs/comments) and code search (`git grep`).
 
 ## Run it
+
+Building needs Rust 1.85 or newer (edition 2024) and a C toolchain for the
+bundled SQLite. The release binary needs neither: it is statically linked.
 
 ```sh
 cargo build --release

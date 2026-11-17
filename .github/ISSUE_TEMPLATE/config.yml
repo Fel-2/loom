@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/Fel-2/loom/security/advisories/new
+    about: Do not open a public issue for anything exploitable.
+  - name: Threat model
+    url: https://github.com/Fel-2/loom/blob/main/SECURITY.md
+    about: What loom is and is not hardened against.

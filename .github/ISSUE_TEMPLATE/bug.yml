@@ -1,0 +1,67 @@
+name: Bug report
+description: Something is broken in the web UI, git transport, or CLI
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For anything security-related, do **not** file an issue here — see
+        [SECURITY.md](https://github.com/Fel-2/loom/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command or click, what you expected, what you got. Paste error text rather than describing it.
+      placeholder: |
+        git clone http://localhost:3000/fel/repo.git
+        → fatal: the remote end hung up unexpectedly
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: If it needs a specific repository shape (large file, LFS pointer, submodule, tag), say so.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: looms version
+      description: Output of `loom version`.
+      placeholder: loom 0.1.0 (git version 2.43.0)
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`loom doctor` output"
+      description: Run it with the same `LOOM_DATA` the server uses.
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How is it running
+      options:
+        - systemd unit
+        - runit
+        - container (podman/docker)
+        - by hand in a terminal
+        - behind a reverse proxy
+    validations:
+      required: true
+
+  - type: input
+    id: proxy
+    attributes:
+      label: Reverse proxy, if any
+      description: Caddy, nginx, Tailscale funnel… and whether `LOOM_TRUST_PROXY` and `LOOM_URL` are set to the public https URL.
+    validations:
+      required: false

@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a feature — read CONTRIBUTING.md's scope list first
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        loom deliberately stays small. Federation, a CI runner, a package
+        registry, a wiki and anything needing Redis or a job queue are out of
+        scope by design — see [CONTRIBUTING.md](https://github.com/Fel-2/loom/blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you actually unable to do today? Describe the workflow, not the feature you have in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think should happen
+    validations:
+      required: false
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What does it cost
+      description: Extra memory at idle, extra dependencies, a new background process, another page of SQLite. If it needs a worker or a service, say so plainly.
+    validations:
+      required: false
