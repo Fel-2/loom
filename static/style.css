@@ -78,7 +78,7 @@ ul.commits .summary { display: block; font-weight: 500; overflow: hidden; text-o
 table.code { width: 100%; border-collapse: collapse; font-size: .85rem; line-height: 1.45; }
 table.code td { padding: 0 .75rem; vertical-align: top; }
 td.ln { width: 1%; text-align: right; color: var(--muted); user-select: none; white-space: nowrap; border-right: 1px solid var(--line); }
-td.src { white-space: pre; }
+td.src { white-space: pre-wrap; overflow-wrap: anywhere; }
 tr:target td { background: #fef9c3; }
 @media (prefers-color-scheme: dark) { tr:target td { background: #3b3417; } }
 tr.add td { background: var(--add); } tr.add td.src { color: var(--add-fg); }
