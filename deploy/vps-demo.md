@@ -173,3 +173,34 @@ curl -sI https://admin.example.com | head -1    # 302 to Cloudflare Access
 
 If those four pass, the box has no reachable attack surface beyond Cloudflare
 and whatever loom itself does — and `SECURITY.md` explains what that is.
+
+## No VPS: a weekend from the laptop
+
+You do not need any of this to demo for a few days. `scripts/demo-local.sh`
+serves a seeded throwaway instance through a Cloudflare **quick tunnel**: no
+account, no open ports, no certificate, a random `https://<words>.trycloudflare.com`
+URL that dies with the process.
+
+```sh
+curl -L -o ~/.local/bin/cloudflared \
+  https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+chmod +x ~/.local/bin/cloudflared
+
+./scripts/demo-local.sh dist/loom-project-0.2.0.tar.gz
+```
+
+What it does beyond "start a server":
+
+- uses a **separate data directory** (`~/.local/share/loom-demo`), so the real
+  instance on `:3000` is untouched and stays on localhost
+- **randomises the password of every seeded account** — the bundle's are
+  published (`alice-test-pw` in the test docs), and an admin login on a public
+  demo is how a demo gets emptied out. Anonymous browsing and cloning still work.
+- reads the tunnel URL *before* starting loom, so `LOOM_URL` and every clone
+  link are correct
+- `LOOM_SSH_ADDR=off`, `LOOM_TRUST_PROXY=1`, `LOOM_RATE_WRITE=20`
+
+Caveats for a laptop demo: closing the lid suspends through elogind, so keep it
+open and run `systemd-inhibit --what=idle:sleep --why='loom demo' sleep infinity`
+in another terminal. Home upload bandwidth is what clones get. The URL changes
+on every start, so don't print it in something permanent.
