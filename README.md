@@ -158,6 +158,9 @@ Backups: `sqlite3 data/loom.db ".backup out.db"` plus `data/repos/`.
 - **systemd**: `deploy/loom.service` (hardened: loom can only write
   `LOOM_DATA`). Put a reverse proxy in front for TLS and set `LOOM_URL` to the
   public URL; add `LOOM_TRUST_PROXY=1` if the proxy sets `X-Forwarded-For`.
+- **Public demo behind Cloudflare, no open ports**: [deploy/vps-demo.md](deploy/vps-demo.md)
+  walks through a small VPS, a cloudflared tunnel, Tailscale for access and a
+  seeded throwaway instance.
 - **Health / metrics**: `GET /healthz` (JSON, 503 when the DB or storage is
   broken) and `GET /metrics` (Prometheus text: uptime, request counters,
   in-flight requests, free git slots, RSS, threads, repo count).
